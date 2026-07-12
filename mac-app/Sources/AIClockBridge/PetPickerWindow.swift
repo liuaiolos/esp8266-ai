@@ -215,11 +215,12 @@ final class PetPickerWindowController: NSObject, NSTableViewDataSource, NSTableV
         }
         uploadButton.isEnabled = false
         statusLabel.stringValue = "正在上传到设备并解码（约几秒）…"
-        DeviceClient.uploadGif(gif, slot: s.slot) { [weak self] error in
+        let uploadState = selectedState.id == "running" ? "work" : "idle"
+        DeviceClient.uploadGif(gif, slot: s.slot, state: uploadState) { [weak self] error in
             guard let self = self else { return }
             self.uploadButton.isEnabled = true
             self.statusLabel.stringValue = error.map { "上传失败：\($0.localizedDescription)" }
-                ?? "✅ 已应用：\(pet.displayName) 现在是 \(s.slot == "claude" ? "Claude" : "Codex") 的桌宠"
+                ?? "✅ 已发送：设备正在后台解码并应用 \(pet.displayName)（几秒后生效）"
         }
     }
 }

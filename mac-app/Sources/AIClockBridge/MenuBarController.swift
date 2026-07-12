@@ -16,6 +16,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let codexUsageItem = NSMenuItem(title: "Codex …", action: nil, keyEquivalent: "")
     private let deviceInfoItem = NSMenuItem(title: "设备：未设置", action: nil, keyEquivalent: "")
     private var modeItems: [String: NSMenuItem] = [:]
+    private var quotaDisplayItems: [String: NSMenuItem] = [:]
 
     init(service: StatusService, usage: UsageFetcher, netMonitor: NetSpeedMonitor,
          nowPlaying: NowPlayingMonitor, port: UInt16) {
@@ -91,6 +92,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let displayItem = NSMenuItem(title: "屏幕显示", action: nil, keyEquivalent: "")
         displayItem.submenu = displayMenu
         menu.addItem(displayItem)
+
+        let quotaMenu = NSMenu()
+        for (title, mode) in [("显示已用", "used"), ("显示剩余", "remaining")] {
+            let item = NSMenuItem(title: title, action: #selector(setQuotaDisplay(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode
+            quotaDisplayItems[mode] = item
+            quotaMenu.addItem(item)
+        }
+        let quotaItem = NSMenuItem(title: "额度显示", action: nil, keyEquivalent: "")
+        quotaItem.submenu = quotaMenu
+        menu.addItem(quotaItem)
         // (屏幕亮度在左键弹出的镜像页底部，做成滑条了)
 
         menu.addItem(makeItem("更换桌宠动画…（petdex）", #selector(openPetPicker)))
@@ -160,6 +173,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         guard !host.isEmpty else {
             deviceInfoItem.title = "设备：未设置地址"
             modeItems.values.forEach { $0.state = .off }
+            quotaDisplayItems.values.forEach { $0.state = .off }
             return
         }
         deviceInfoItem.title = "设备：\(host)（连接中…）"
@@ -175,9 +189,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 self.deviceInfoItem.title =
                     "设备：\(info.ip) · 正在显示 \(showing) · \(sprites.joined(separator: " "))"
                 for (mode, item) in self.modeItems { item.state = mode == info.mode ? .on : .off }
+                for (mode, item) in self.quotaDisplayItems { item.state = mode == info.quotaDisplay ? .on : .off }
             case .failure:
                 self.deviceInfoItem.title = "设备：\(host)（无法连接）"
                 self.modeItems.values.forEach { $0.state = .off }
+                self.quotaDisplayItems.values.forEach { $0.state = .off }
                 // self-heal: the device may have moved to a new DHCP address;
                 // if it recently polled us from a different IP, adopt that.
                 let seen = DeviceClient.lastSeenIP
@@ -250,6 +266,17 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     @objc private func setDisplayMode(_ sender: NSMenuItem) {
         guard let mode = sender.representedObject as? String else { return }
         DeviceClient.setDisplayMode(mode) { [weak self] error in
+            if let error = error {
+                Self.toast("切换失败", error.localizedDescription)
+            } else {
+                self?.refreshDeviceSection()
+            }
+        }
+    }
+
+    @objc private func setQuotaDisplay(_ sender: NSMenuItem) {
+        guard let mode = sender.representedObject as? String else { return }
+        DeviceClient.setQuotaDisplay(mode) { [weak self] error in
             if let error = error {
                 Self.toast("切换失败", error.localizedDescription)
             } else {

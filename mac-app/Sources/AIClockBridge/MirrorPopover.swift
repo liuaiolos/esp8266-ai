@@ -568,18 +568,22 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         }
         let snap = service.snapshot()
         mirror.showingClaude = info.showing != "codex"
+        let displayPct: (Double?) -> Double? = { pct in
+            guard let pct = pct else { return nil }
+            return info.quotaDisplay == "remaining" ? max(0, 100 - pct) : pct
+        }
         if mirror.showingClaude {
             let pct = snap.claude.fiveHourPct
                 ?? (snap.claude.sessionWindowMin > 0
                     ? 100.0 * Double(snap.claude.sessionMin) / Double(snap.claude.sessionWindowMin) : 0)
-            mirror.ringPct = pct
-            mirror.line1 = "5h " + Self.pctText(pct)
-            mirror.line2 = "Weekly " + Self.pctText(snap.claude.sevenDayPct)
+            mirror.ringPct = displayPct(pct) ?? 0
+            mirror.line1 = "5h " + Self.pctText(displayPct(pct))
+            mirror.line2 = "Weekly " + Self.pctText(displayPct(snap.claude.sevenDayPct))
             mirror.needsInput = snap.claude.needsInput
         } else {
-            mirror.ringPct = snap.codex.primaryPct ?? 0
-            mirror.line1 = "5h " + Self.pctText(snap.codex.primaryPct)
-            mirror.line2 = "Weekly " + Self.pctText(snap.codex.weeklyPct)
+            mirror.ringPct = displayPct(snap.codex.primaryPct) ?? 0
+            mirror.line1 = "5h " + Self.pctText(displayPct(snap.codex.primaryPct))
+            mirror.line2 = "Weekly " + Self.pctText(displayPct(snap.codex.weeklyPct))
             mirror.needsInput = snap.codex.needsInput
         }
         mirror.needsDisplay = true

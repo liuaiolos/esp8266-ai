@@ -140,7 +140,9 @@ final class StatusService {
 
     private let workingThreshold: TimeInterval = 20        // log touched within this -> "working"
     private let idleThreshold: TimeInterval = 30 * 60      // within this -> "idle", else "offline"
-    private let cacheTTL: TimeInterval = 5
+    // The clock polls every second. Keep scans short-lived so its display
+    // reflects freshly-written CLI logs within about one second.
+    private let cacheTTL: TimeInterval = 1
 
     private let lock = NSLock()
     private var cached: Snapshot?

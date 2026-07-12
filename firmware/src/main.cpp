@@ -1,14 +1,14 @@
-// ESP8266 WiFi clock: shows local time plus live Claude Code / Codex CLI
+// M5Stack Core ESP32 WiFi clock: shows local time plus live Claude Code / Codex CLI
 // working status and usage quota, polled from a small bridge service that
 // runs on the developer's Mac (see ../bridge/bridge.py).
 //
-// Display: 240x240 SPI ST7789 (TFT_eSPI). Pin mapping is set via build_flags
+// Display: 320x240 SPI ILI9341 (TFT_eSPI). Pin mapping is set via build_flags
 // in platformio.ini - edit those if your wiring differs.
 
 #include <Arduino.h>
-#include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
-#include <ESP8266HTTPClient.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <HTTPClient.h>
 #include <WiFiClient.h>
 #include <WiFiManager.h>
 #include <LittleFS.h>
@@ -23,7 +23,7 @@
 #include "img/codex_logo.h"
 
 TFT_eSPI tft = TFT_eSPI();
-ESP8266WebServer webServer(80);
+WebServer webServer(80);
 
 // ---------- custom sprite storage (LittleFS) ----------
 // Custom uploads replace the compiled-in default animation without needing a
@@ -38,6 +38,8 @@ ESP8266WebServer webServer(80);
 // compiled-in defaults and custom uploads share one draw path.
 const char *CLAUDE_SPRITE_FILE = "/c.bin";
 const char *CODEX_SPRITE_FILE = "/x.bin";
+const char *CLAUDE_IDLE_FILE = "/c_idle.bin";
+const char *CODEX_IDLE_FILE = "/x_idle.bin";
 const char *CLAUDE_GIF_FILE = "/c.gif"; // raw upload, decoded then removed
 const char *CODEX_GIF_FILE = "/x.gif";
 const int MAX_CUSTOM_FRAMES = 8;
@@ -51,14 +53,27 @@ const size_t CODEX_FRAME_BYTES = (size_t)CODEX_SPRITE_W * CODEX_SPRITE_H * 2;
 // two small scratch rows (SCREEN_W is the widest we ever need).
 uint16_t rowBuf[SCREEN_W];     // current row being drawn / decoded
 uint16_t prevRowBuf[SCREEN_W]; // decode only: same row from the previous frame
+// ESP32 has enough heap for one decoded custom frame. Caching the active frame
+// avoids opening/reading LittleFS once per scanline, which otherwise starves
+// the HTTP server during the animation.
+uint8_t spriteFrameCache[CODEX_FRAME_BYTES];
+
+// Sprite/GIF/music payloads are stored in the byte-pre-swapped format emitted
+// by tools/convert_sprites.py. TFT_eSPI's default ESP32 pushImage() path sends
+// the uint16_t memory bytes as-is, so these rows must be passed unchanged.
+inline uint16_t swap565(uint16_t c) { return (uint16_t)((c << 8) | (c >> 8)); }
 
 bool claudeCustom = false;
 int claudeCustomFrames = 0;
 bool codexCustom = false;
 int codexCustomFrames = 0;
+bool claudeIdleCustom = false;
+int claudeIdleFrames = 0;
+bool codexIdleCustom = false;
+int codexIdleFrames = 0;
 uint32_t spriteRev = 0; // bumped on upload/reset so the Mac mirror re-fetches
 
-const int SCREEN_CX = 120, SCREEN_CY = 120;
+const int SCREEN_CX = SCREEN_W / 2, SCREEN_CY = SCREEN_H / 2;
 const int RING_MARGIN = 4;      // inset from screen edge
 const int RING_THICKNESS = 10;  // ring bar thickness
 const unsigned long ANIM_INTERVAL_MS = 120;  // sprite frame advance
@@ -75,6 +90,7 @@ unsigned long lastSwitchMs = 0;
 // net/music = show Mac-side telemetry pages instead of the pet.
 enum DisplayMode { MODE_AUTO, MODE_CLAUDE, MODE_CODEX, MODE_NET, MODE_MUSIC };
 DisplayMode displayMode = MODE_AUTO;
+bool appRedrawRequested = false; // defer expensive TFT work until after HTTP replies
 
 // When AUTO and the Mac reports audio playing, the screen auto-switches to the
 // music page and back when it stops — same spirit as the Claude/Codex auto
@@ -164,16 +180,66 @@ unsigned long lastPollMs = 0;
 unsigned long lastSuccessMs = 0;
 bool everPolled = false;
 
+// Quota values from the bridge are always "used" percentages. This preference
+// only changes how they are rendered, not the exhausted-window countdown.
+bool showQuotaRemaining = false;
+
 // ---------- backlight brightness ----------
-// The panel backlight (TFT_BL, active LOW) is PWM-dimmable — the vendor's own
-// firmware does the same. 0 = off, 100 = full. Persisted so it survives reboot.
+// The M5Stack Core panel backlight (TFT_BL, active HIGH) is PWM-dimmable.
+// 0 = off, 100 = full. Persisted so it survives reboot.
 
 int brightness = BRIGHTNESS_DEFAULT; // 0-100
 
+void loadQuotaDisplay() {
+  if (!LittleFS.exists(QUOTA_DISPLAY_FILE)) return;
+  File f = LittleFS.open(QUOTA_DISPLAY_FILE, "r");
+  if (!f) return;
+  String value = f.readStringUntil('\n');
+  value.trim();
+  f.close();
+  showQuotaRemaining = value == "remaining";
+}
+
+void saveQuotaDisplay() {
+  File f = LittleFS.open(QUOTA_DISPLAY_FILE, "w");
+  if (!f) return;
+  f.println(showQuotaRemaining ? "remaining" : "used");
+  f.close();
+}
+
+float displayedQuotaPct(float usedPct) {
+  if (usedPct < 0) return usedPct;
+  return showQuotaRemaining ? 100.0f - usedPct : usedPct;
+}
+
+void loadDisplayMode() {
+  if (!LittleFS.exists(DISPLAY_MODE_FILE)) return;
+  File f = LittleFS.open(DISPLAY_MODE_FILE, "r");
+  if (!f) return;
+  String value = f.readStringUntil('\n');
+  value.trim();
+  f.close();
+  if (value == "claude") displayMode = MODE_CLAUDE;
+  else if (value == "codex") displayMode = MODE_CODEX;
+  else if (value == "net") displayMode = MODE_NET;
+  else if (value == "music") displayMode = MODE_MUSIC;
+  else displayMode = MODE_AUTO;
+}
+
+void saveDisplayMode() {
+  const char *value = "auto";
+  if (displayMode == MODE_CLAUDE) value = "claude";
+  else if (displayMode == MODE_CODEX) value = "codex";
+  else if (displayMode == MODE_NET) value = "net";
+  else if (displayMode == MODE_MUSIC) value = "music";
+  File f = LittleFS.open(DISPLAY_MODE_FILE, "w");
+  if (!f) return;
+  f.println(value);
+  f.close();
+}
+
 void applyBrightness() {
-  // analogWriteRange(100) is set in setup(), so the duty value is just the
-  // inverted percentage (active LOW: 0 duty = always LOW = full on).
-  analogWrite(TFT_BL, 100 - brightness);
+  ledcWrite(0, map(brightness, 0, 100, 0, 255));
 }
 
 void loadBrightness() {
@@ -214,33 +280,22 @@ void saveBridgeHost(const String &host) {
 // Checks LittleFS for a previously-uploaded custom sprite and validates its
 // size before trusting it (frame count byte + exact expected byte length).
 void loadCustomSpriteState() {
-  claudeCustom = false;
-  if (LittleFS.exists(CLAUDE_SPRITE_FILE)) {
-    File f = LittleFS.open(CLAUDE_SPRITE_FILE, "r");
+  auto load = [](const char *path, size_t frameBytes, bool &ok, int &frames) {
+    ok = false; frames = 0;
+    File f = LittleFS.open(path, "r");
     if (f && f.size() >= 1) {
       uint8_t cnt = f.read();
-      size_t expected = 1 + (size_t)cnt * CLAUDE_FRAME_BYTES;
+      size_t expected = 1 + (size_t)cnt * frameBytes;
       if (cnt > 0 && cnt <= MAX_CUSTOM_FRAMES && (size_t)f.size() == expected) {
-        claudeCustom = true;
-        claudeCustomFrames = cnt;
+        ok = true; frames = cnt;
       }
     }
     if (f) f.close();
-  }
-
-  codexCustom = false;
-  if (LittleFS.exists(CODEX_SPRITE_FILE)) {
-    File f = LittleFS.open(CODEX_SPRITE_FILE, "r");
-    if (f && f.size() >= 1) {
-      uint8_t cnt = f.read();
-      size_t expected = 1 + (size_t)cnt * CODEX_FRAME_BYTES;
-      if (cnt > 0 && cnt <= MAX_CUSTOM_FRAMES && (size_t)f.size() == expected) {
-        codexCustom = true;
-        codexCustomFrames = cnt;
-      }
-    }
-    if (f) f.close();
-  }
+  };
+  load(CLAUDE_SPRITE_FILE, CLAUDE_FRAME_BYTES, claudeCustom, claudeCustomFrames);
+  load(CODEX_SPRITE_FILE, CODEX_FRAME_BYTES, codexCustom, codexCustomFrames);
+  load(CLAUDE_IDLE_FILE, CLAUDE_FRAME_BYTES, claudeIdleCustom, claudeIdleFrames);
+  load(CODEX_IDLE_FILE, CODEX_FRAME_BYTES, codexIdleCustom, codexIdleFrames);
 
   Serial.printf("[sprite] claude custom=%d frames=%d | codex custom=%d frames=%d\n", claudeCustom,
                 claudeCustomFrames, codexCustom, codexCustomFrames);
@@ -248,6 +303,8 @@ void loadCustomSpriteState() {
 
 int claudeFrameCount() { return claudeCustom ? claudeCustomFrames : CLAUDE_SPRITE_FRAMES; }
 int codexFrameCount() { return codexCustom ? codexCustomFrames : CODEX_SPRITE_FRAMES; }
+int claudeIdleFrameCount() { return claudeIdleCustom ? claudeIdleFrames : claudeFrameCount(); }
+int codexIdleFrameCount() { return codexIdleCustom ? codexIdleFrames : codexFrameCount(); }
 
 // Draws one sprite frame centered on screen, one row at a time so we never
 // need a full-frame buffer: each row comes either from the custom LittleFS
@@ -260,16 +317,23 @@ void drawSpriteFrame(bool custom, const char *file, const uint16_t *const *progm
     File f = LittleFS.open(file, "r");
     if (!f) return;
     f.seek(1 + (size_t)frameIdx * frameBytes);
-    for (int r = 0; r < h; r++) {
-      f.read((uint8_t *)rowBuf, rowBytes);
-      tft.pushImage(x0, y0 + r, w, 1, rowBuf);
+    if (f.read(spriteFrameCache, frameBytes) != (int)frameBytes) {
+      f.close();
+      return;
     }
     f.close();
+    for (int r = 0; r < h; r++) {
+      memcpy(rowBuf, spriteFrameCache + (size_t)r * rowBytes, rowBytes);
+      tft.pushImage(x0, y0 + r, w, 1, rowBuf);
+      // Keep WiFi/WebServer responsive while streaming a frame from LittleFS.
+      if ((r & 3) == 3) yield();
+    }
   } else {
     const uint16_t *frame = progmemFrames[frameIdx];
     for (int r = 0; r < h; r++) {
       memcpy_P(rowBuf, frame + (size_t)r * w, rowBytes);
       tft.pushImage(x0, y0 + r, w, 1, rowBuf);
+      if ((r & 3) == 3) yield();
     }
   }
 }
@@ -300,7 +364,7 @@ void drawStaticChrome() {
 // matches the "urgent, look now" state from the reference signal-light design.
 bool bridgeStale() {
   if (!everPolled) return true;
-  return (millis() - lastSuccessMs) >= 2UL * BRIDGE_POLL_INTERVAL_MS;
+  return (millis() - lastSuccessMs) >= 5UL * BRIDGE_POLL_INTERVAL_MS;
 }
 
 // True when the app currently on screen is waiting on a permission/approval
@@ -381,14 +445,20 @@ void drawSquareRing(float pct, uint16_t color) {
   tft.fillRect(x0, y1 - (int)seg, RING_THICKNESS, (int)seg, color);
 }
 
-void drawClaudeSprite(int frameIdx) {
-  drawSpriteFrame(claudeCustom, CLAUDE_SPRITE_FILE, claude_sprite_frames, frameIdx, CLAUDE_SPRITE_W,
-                  CLAUDE_SPRITE_H, CLAUDE_FRAME_BYTES);
+void drawClaudeSprite(int frameIdx, bool working = true) {
+  int count = working ? claudeFrameCount() : claudeIdleFrameCount();
+  if (count > 0) frameIdx %= count;
+  drawSpriteFrame(working ? claudeCustom : claudeIdleCustom,
+                  working ? CLAUDE_SPRITE_FILE : CLAUDE_IDLE_FILE, claude_sprite_frames, frameIdx,
+                  CLAUDE_SPRITE_W, CLAUDE_SPRITE_H, CLAUDE_FRAME_BYTES);
 }
 
-void drawCodexSprite(int frameIdx) {
-  drawSpriteFrame(codexCustom, CODEX_SPRITE_FILE, codex_sprite_frames, frameIdx, CODEX_SPRITE_W, CODEX_SPRITE_H,
-                  CODEX_FRAME_BYTES);
+void drawCodexSprite(int frameIdx, bool working = true) {
+  int count = working ? codexFrameCount() : codexIdleFrameCount();
+  if (count > 0) frameIdx %= count;
+  drawSpriteFrame(working ? codexCustom : codexIdleCustom,
+                  working ? CODEX_SPRITE_FILE : CODEX_IDLE_FILE, codex_sprite_frames, frameIdx,
+                  CODEX_SPRITE_W, CODEX_SPRITE_H, CODEX_FRAME_BYTES);
 }
 
 String pctText(float pct) {
@@ -397,7 +467,7 @@ String pctText(float pct) {
 
 // Quota readout below the sprite: two columns ("5h" / "Wk"), small grey label
 // over a big font-4 percentage. Values repaint only when their text changes
-// (force = after a full-screen clear), so the 5s poll never flashes them.
+// (force = after a full-screen clear), so status polling never flashes them.
 const int QUOTA_LABEL_Y = 183, QUOTA_VALUE_Y = 199;
 const int QUOTA_COL1_X = 70, QUOTA_COL2_X = 170;
 String lastQuota5h, lastQuotaWk;
@@ -549,13 +619,13 @@ void drawActiveApp() {
   if (showingCd != CD_NONE) syncCountdownDeadline();
   else cdDeadlineMs = 0;
   if (currentApp == APP_CLAUDE) {
-    drawSquareRing(claudeRingPct(), currentStatusColor());
-    if (showingCd == CD_NONE) drawClaudeSprite(claudeFrame);
-    drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, true);
+    drawSquareRing(displayedQuotaPct(claudeRingPct()), currentStatusColor());
+    if (showingCd == CD_NONE) drawClaudeSprite(claudeFrame, claudeStatus.status == "working");
+    drawQuotaText(displayedQuotaPct(claudeRingPct()), displayedQuotaPct(claudeStatus.sevenDayPct), true);
   } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
-    if (showingCd == CD_NONE) drawCodexSprite(codexFrame);
-    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, true);
+    drawSquareRing(max(displayedQuotaPct(codexStatus.primaryPct), 0.0f), currentStatusColor());
+    if (showingCd == CD_NONE) drawCodexSprite(codexFrame, codexStatus.status == "working");
+    drawQuotaText(displayedQuotaPct(codexStatus.primaryPct), displayedQuotaPct(codexStatus.weeklyPct), true);
   }
   if (showingCd != CD_NONE) drawCountdown(true);
   drawAppLogo();
@@ -569,11 +639,11 @@ void refreshActiveApp() {
     return;
   }
   if (currentApp == APP_CLAUDE) {
-    drawSquareRing(claudeRingPct(), currentStatusColor());
-    drawQuotaText(claudeRingPct(), claudeStatus.sevenDayPct, false);
+    drawSquareRing(displayedQuotaPct(claudeRingPct()), currentStatusColor());
+    drawQuotaText(displayedQuotaPct(claudeRingPct()), displayedQuotaPct(claudeStatus.sevenDayPct), false);
   } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
-    drawQuotaText(codexStatus.primaryPct, codexStatus.weeklyPct, false);
+    drawSquareRing(max(displayedQuotaPct(codexStatus.primaryPct), 0.0f), currentStatusColor());
+    drawQuotaText(displayedQuotaPct(codexStatus.primaryPct), displayedQuotaPct(codexStatus.weeklyPct), false);
   }
   if (showingCd != CD_NONE) {
     syncCountdownDeadline();
@@ -585,9 +655,9 @@ void refreshActiveApp() {
 // between full redraws.
 void redrawRingOnly() {
   if (currentApp == APP_CLAUDE) {
-    drawSquareRing(claudeRingPct(), currentStatusColor());
+    drawSquareRing(displayedQuotaPct(claudeRingPct()), currentStatusColor());
   } else {
-    drawSquareRing(max(codexStatus.primaryPct, 0.0f), currentStatusColor());
+    drawSquareRing(max(displayedQuotaPct(codexStatus.primaryPct), 0.0f), currentStatusColor());
   }
 }
 
@@ -640,10 +710,6 @@ String speedText(long bps) {
   else snprintf(buf, sizeof(buf), "%ldB", bps);
   return String(buf);
 }
-
-// pushImage() colors must be pre-byte-swapped (this firmware never enables
-// setSwapBytes; see the sprite pipeline). Natural RGB565 -> wire order:
-inline uint16_t swap565(uint16_t c) { return (uint16_t)((c << 8) | (c >> 8)); }
 
 void resetNetChart() {
   memset(netHistRx, 0, sizeof(netHistRx));
@@ -1017,6 +1083,9 @@ void setupWiFi() {
 
   Serial.println("[wifi] starting WiFiManager autoConnect...");
   bool ok = wm.autoConnect(WIFI_PORTAL_AP_NAME);
+  // Keep the HTTP admin endpoint responsive on this battery-powered ESP32;
+  // modem-sleep can otherwise add multi-second stalls while the TFT is busy.
+  WiFi.setSleep(false);
   Serial.printf("[wifi] autoConnect result=%d ssid=%s ip=%s\n", ok, WiFi.SSID().c_str(),
                 WiFi.localIP().toString().c_str());
   Serial.printf("[wifi] bridge host = '%s'\n", bridgeHost.c_str());
@@ -1151,6 +1220,13 @@ void handleRoot() {
   html += "<div style='font-size:13px;color:#555'>当前：<span id='briv'>" + String(brightness) +
           "%</span>（0 = 熄屏，设置立即生效并记住）</div>";
 
+  html += "<h2 style='font-size:16px;margin-top:28px'>额度显示</h2>";
+  html += "<select id='quota' onchange=\"fetch('/api/quota-display',{method:'POST',headers:{'Content-Type':"
+          "'application/x-www-form-urlencoded'},body:'mode='+this.value})\">";
+  html += "<option value='used'" + String(showQuotaRemaining ? "" : " selected") + ">显示已用</option>";
+  html += "<option value='remaining'" + String(showQuotaRemaining ? " selected" : "") + ">显示剩余</option>";
+  html += "</select><div style='font-size:13px;color:#555;margin-top:4px'>同时影响进度环和 5h / Wk 百分比，设置会保存。</div>";
+
   // On-device GIF upload: replaces a character's animation without reflashing.
   html += "<h2 style='font-size:16px;margin-top:28px'>桌宠动画（上传 GIF）</h2>";
   html += "<p style='font-size:13px;color:#555'>上传一个 .gif，设备会在板上解码并缩放到对应角色的尺寸，"
@@ -1217,6 +1293,7 @@ void handleApiInfo() {
   doc["last_update_s"] = everPolled ? (long)((millis() - lastSuccessMs) / 1000) : -1;
   doc["sprite_rev"] = spriteRev;
   doc["brightness"] = brightness;
+  doc["quota_display"] = showQuotaRemaining ? "remaining" : "used";
   doc["fw"] = FW_VERSION;
   JsonObject c = doc["claude"].to<JsonObject>();
   c["status"] = claudeStatus.status;
@@ -1244,6 +1321,7 @@ void handleApiDisplay() {
     webServer.send(400, "text/plain", "mode must be auto|claude|codex|net|music");
     return;
   }
+  saveDisplayMode();
   Serial.printf("[api] display mode = %s\n", mode.c_str());
   if (displayMode == MODE_NET) {
     netChromeDrawn = false;
@@ -1252,8 +1330,7 @@ void handleApiDisplay() {
     musicChromeDrawn = false;
     lastMusicPollMs = 0; // poll + draw on the next loop tick
   } else {
-    updateActiveApp();
-    drawActiveApp(); // unconditional: also repaints over a previous net chart
+    appRedrawRequested = true;
   }
   webServer.send(200, "text/plain", "ok");
 }
@@ -1271,6 +1348,20 @@ void handleApiBrightness() {
   applyBrightness();
   saveBrightness();
   Serial.printf("[api] brightness = %d\n", brightness);
+  webServer.send(200, "text/plain", "ok");
+}
+
+void handleApiQuotaDisplay() {
+  String mode = webServer.arg("mode");
+  if (mode == "used") showQuotaRemaining = false;
+  else if (mode == "remaining") showQuotaRemaining = true;
+  else {
+    webServer.send(400, "text/plain", "mode must be used|remaining");
+    return;
+  }
+  saveQuotaDisplay();
+  if (effectiveMode() != MODE_NET && effectiveMode() != MODE_MUSIC) appRedrawRequested = true;
+  Serial.printf("[api] quota display = %s\n", mode.c_str());
   webServer.send(200, "text/plain", "ok");
 }
 
@@ -1374,8 +1465,10 @@ void gifCloseCB(void *) {
 
 int32_t gifReadCB(GIFFILE *pFile, uint8_t *pBuf, int32_t iLen) {
   File *f = (File *)pFile->fHandle;
-  // AnimatedGIF's own SD example keeps this one-byte-short guard near EOF.
-  if ((pFile->iSize - pFile->iPos) < iLen) iLen = pFile->iSize - pFile->iPos - 1;
+  // Read all remaining bytes. Dropping the final byte breaks GIFs whose
+  // trailer/data boundary is significant.
+  int32_t remaining = pFile->iSize - pFile->iPos;
+  if (remaining < iLen) iLen = remaining;
   if (iLen <= 0) return 0;
   int32_t n = (int32_t)f->read(pBuf, iLen);
   pFile->iPos = (int32_t)f->position();
@@ -1527,6 +1620,9 @@ bool decodeGifToBin(const char *gifPath, const char *binPath, int targetW, int t
 // upload over its streaming multipart/HTTPUpload path, writing the raw .gif to
 // LittleFS in small chunks, then decode it on the done callback.
 File uploadFile;
+bool spriteDecodePending = false;
+ActiveApp spriteDecodeSlot = APP_CLAUDE;
+bool spriteDecodeWorking = true;
 
 void handleSpriteUploadChunk(const char *gifPath) {
   HTTPUpload &upload = webServer.upload();
@@ -1539,26 +1635,49 @@ void handleSpriteUploadChunk(const char *gifPath) {
   }
 }
 
-void handleSpriteUploadDone(ActiveApp slot) {
-  const char *gifPath = (slot == APP_CLAUDE) ? CLAUDE_GIF_FILE : CODEX_GIF_FILE;
-  const char *binPath = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_FILE : CODEX_SPRITE_FILE;
+void handleSpriteUploadDone(ActiveApp slot, bool working = true) {
+  const char *gifPath = (slot == APP_CLAUDE) ? (working ? "/c_work.gif" : "/c_idle.gif")
+                                            : (working ? "/x_work.gif" : "/x_idle.gif");
+  if (spriteDecodePending) {
+    webServer.send(409, "text/plain", "another sprite is still decoding");
+    return;
+  }
+  File f = LittleFS.open(gifPath, "r");
+  bool uploaded = f && f.size() > 0;
+  if (f) f.close();
+  if (!uploaded) {
+    webServer.send(400, "text/plain", "empty GIF upload");
+    return;
+  }
+  // Do not hold the HTTP connection open during AnimatedGIF/LittleFS work.
+  spriteDecodeSlot = slot;
+  spriteDecodeWorking = working;
+  spriteDecodePending = true;
+  webServer.send(202, "text/plain", "accepted; GIF decoding in background");
+  Serial.printf("[sprite] upload received (%s), queued for background decode\n", gifPath);
+}
+
+void processPendingSpriteDecode() {
+  if (!spriteDecodePending) return;
+  spriteDecodePending = false;
+  ActiveApp slot = spriteDecodeSlot;
+  bool working = spriteDecodeWorking;
+  const char *gifPath = (slot == APP_CLAUDE) ? (working ? "/c_work.gif" : "/c_idle.gif")
+                                            : (working ? "/x_work.gif" : "/x_idle.gif");
+  const char *binPath = (slot == APP_CLAUDE) ? (working ? CLAUDE_SPRITE_FILE : CLAUDE_IDLE_FILE)
+                                            : (working ? CODEX_SPRITE_FILE : CODEX_IDLE_FILE);
   int tw = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_W : CODEX_SPRITE_W;
   int th = (slot == APP_CLAUDE) ? CLAUDE_SPRITE_H : CODEX_SPRITE_H;
-
   bool ok = decodeGifToBin(gifPath, binPath, tw, th);
-  LittleFS.remove(gifPath); // temp raw gif no longer needed once decoded
-
-  spriteRev++;
-  loadCustomSpriteState();
-  if (slot == APP_CLAUDE) claudeFrame = 0;
-  else codexFrame = 0;
-  if (currentApp == slot) drawActiveApp();
-
+  LittleFS.remove(gifPath);
   if (ok) {
-    webServer.send(200, "text/plain", "ok");
+    spriteRev++;
+    loadCustomSpriteState();
+    if (slot == APP_CLAUDE) claudeFrame = 0;
+    else codexFrame = 0;
+    if (currentApp == slot) drawActiveApp();
     Serial.println("[sprite] gif decoded & applied");
   } else {
-    webServer.send(500, "text/plain", "gif decode failed (too large or unsupported?)");
     Serial.println("[sprite] gif decode FAILED");
   }
 }
@@ -1571,6 +1690,7 @@ void setupWebServer() {
   webServer.on("/api/display", HTTP_POST, handleApiDisplay);
   webServer.on("/api/bridge", HTTP_POST, handleApiBridge);
   webServer.on("/api/brightness", HTTP_POST, handleApiBrightness);
+  webServer.on("/api/quota-display", HTTP_POST, handleApiQuotaDisplay);
   webServer.on("/sprite/claude/reset", HTTP_POST, []() { handleSpriteReset(APP_CLAUDE); });
   webServer.on("/sprite/codex/reset", HTTP_POST, []() { handleSpriteReset(APP_CODEX); });
   webServer.on("/sprite/claude/raw", HTTP_GET, []() { handleSpriteRaw(APP_CLAUDE); });
@@ -1581,28 +1701,68 @@ void setupWebServer() {
   webServer.on(
       "/sprite/codex", HTTP_POST, []() { handleSpriteUploadDone(APP_CODEX); },
       []() { handleSpriteUploadChunk(CODEX_GIF_FILE); });
+  webServer.on("/sprite/claude/work", HTTP_POST, []() { handleSpriteUploadDone(APP_CLAUDE, true); },
+               []() { handleSpriteUploadChunk("/c_work.gif"); });
+  webServer.on("/sprite/claude/idle", HTTP_POST, []() { handleSpriteUploadDone(APP_CLAUDE, false); },
+               []() { handleSpriteUploadChunk("/c_idle.gif"); });
+  webServer.on("/sprite/codex/work", HTTP_POST, []() { handleSpriteUploadDone(APP_CODEX, true); },
+               []() { handleSpriteUploadChunk("/x_work.gif"); });
+  webServer.on("/sprite/codex/idle", HTTP_POST, []() { handleSpriteUploadDone(APP_CODEX, false); },
+               []() { handleSpriteUploadChunk("/x_idle.gif"); });
   webServer.begin();
   Serial.printf("[web] admin server listening on http://%s/\n", WiFi.localIP().toString().c_str());
+}
+
+// Keep HTTP processing off the Arduino UI loop. ESP32 has FreeRTOS tasks
+// rather than separate processes; pin the lightweight WebServer task to the
+// other core so TFT SPI drawing cannot starve management requests.
+void webServerTask(void *) {
+  for (;;) {
+    webServer.handleClient();
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
 }
 
 // ---------- Arduino entry points ----------
 
 void setup() {
   Serial.begin(115200);
-  LittleFS.begin();
+  // The M5 custom partition is explicitly named "littlefs". A freshly
+  // flashed volume is blank, so format that exact partition once on failure
+  // and then mount it again. Passing the label avoids Core-specific automatic
+  // partition discovery that can miss the custom label.
+  const char *littlefsLabel = "littlefs";
+  bool fsMounted = LittleFS.begin(false, "/littlefs", 10, littlefsLabel);
+  if (!fsMounted) {
+    Serial.println("[fs] initial LittleFS mount failed; formatting partition");
+    if (LittleFS.format()) fsMounted = LittleFS.begin(false, "/littlefs", 10, littlefsLabel);
+  }
+  if (!fsMounted) {
+    Serial.println("[fs] LittleFS mount failed; persistent settings unavailable");
+  } else {
+    Serial.println("[fs] LittleFS mounted");
+  }
   loadBridgeHost();
   loadBrightness();
+  loadQuotaDisplay();
+  loadDisplayMode();
   loadCustomSpriteState();
 
   tft.init();
-  tft.setRotation(0);
+  // This M5 Core panel batch uses the inverted MADCTL polarity: INVON is the
+  // normal-looking mode for it (INVOFF produces white background/magenta green).
+  tft.invertDisplay(true);
+  // Official M5Stack Basic Core orientation: ILI9341 portrait init rotated to
+  // 320x240 landscape. This also supplies the panel's correct MADCTL color order.
+  tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
-  analogWriteFreq(BRIGHTNESS_PWM_FREQ);
-  analogWriteRange(100); // duty maps 1:1 to a 0-100 percentage
+  ledcSetup(0, BRIGHTNESS_PWM_FREQ, 8);
+  ledcAttachPin(TFT_BL, 0);
   applyBrightness();
 
   setupWiFi();
   setupWebServer();
+  xTaskCreatePinnedToCore(webServerTask, "http", 6144, nullptr, 1, nullptr, 0);
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
@@ -1619,13 +1779,18 @@ void setup() {
 }
 
 void loop() {
-  webServer.handleClient();
+  processPendingSpriteDecode();
   unsigned long nowMs = millis();
 
   // Effective mode may differ from the configured one (AUTO -> music while
   // audio plays). On a transition, reset the incoming mode's chrome so it
   // repaints cleanly, and repaint the pet immediately when returning to it.
   DisplayMode eff = effectiveMode();
+  if (appRedrawRequested && eff != MODE_NET && eff != MODE_MUSIC) {
+    appRedrawRequested = false;
+    updateActiveApp();
+    drawActiveApp();
+  }
   if (eff != lastEffectiveMode) {
     lastEffectiveMode = eff;
     if (eff == MODE_NET) {
@@ -1671,6 +1836,18 @@ void loop() {
       } else if (currentApp == APP_CODEX && codexWorking) {
         codexFrame = (codexFrame + 1) % codexFrameCount();
         drawCodexSprite(codexFrame);
+      } else if (currentApp == APP_CLAUDE && claudeIdleCustom) {
+        claudeFrame = (claudeFrame + 1) % claudeIdleFrameCount();
+        drawClaudeSprite(claudeFrame, false);
+      } else if (currentApp == APP_CLAUDE && claudeFrame != 0) {
+        claudeFrame = 0;
+        drawClaudeSprite(claudeFrame, false);
+      } else if (currentApp == APP_CODEX && codexIdleCustom) {
+        codexFrame = (codexFrame + 1) % codexIdleFrameCount();
+        drawCodexSprite(codexFrame, false);
+      } else if (currentApp == APP_CODEX && codexFrame != 0) {
+        codexFrame = 0;
+        drawCodexSprite(codexFrame, false);
       }
     }
 

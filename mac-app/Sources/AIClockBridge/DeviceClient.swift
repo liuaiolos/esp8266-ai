@@ -14,6 +14,7 @@ struct DeviceInfo {
     var lastUpdateS = -1    // seconds since the device last got /status data, -1 = never
     var spriteRev = 0       // bumped by the device on animation change
     var brightness = 100    // backlight 0-100 (0 = off)
+    var quotaDisplay = "used" // used | remaining
     var claudeCustomSprite = false
     var codexCustomSprite = false
     var claudeW = 111, claudeH = 120
@@ -23,6 +24,21 @@ struct DeviceInfo {
 final class DeviceClient {
     private static let hostKey = "device_host"
     private static let lastSeenKey = "device_last_seen"
+
+    // Device APIs live on the private LAN and must not inherit the Mac's
+    // HTTP/SOCKS proxy (Surge and similar tools otherwise turn a reachable
+    // 192.168.x.x clock into a false "offline" result).
+    private static let directSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [
+            "HTTPEnable": 0,
+            "HTTPSEnable": 0,
+            "SOCKSEnable": 0
+        ]
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.timeoutIntervalForRequest = 8
+        return URLSession(configuration: config)
+    }()
 
     static var host: String {
         get { UserDefaults.standard.string(forKey: hostKey) ?? "" }
@@ -49,7 +65,7 @@ final class DeviceClient {
         }
         var req = URLRequest(url: base.appendingPathComponent("api/info"))
         req.timeoutInterval = 5
-        URLSession.shared.dataTask(with: req) { data, _, error in
+        directSession.dataTask(with: req) { data, _, error in
             var result: Result<DeviceInfo, Error>
             if let error = error {
                 result = .failure(error)
@@ -65,6 +81,7 @@ final class DeviceClient {
                 info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
                 info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
                 info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
+                info.quotaDisplay = obj["quota_display"] as? String ?? "used"
                 let claude = obj["claude"] as? [String: Any]
                 let codex = obj["codex"] as? [String: Any]
                 info.claudeCustomSprite = claude?["custom_sprite"] as? Bool ?? false
@@ -96,16 +113,21 @@ final class DeviceClient {
         postForm(path: "api/brightness", fields: ["level": String(level)], completion: completion)
     }
 
+    /// POST /api/quota-display mode=used|remaining; device persists the choice.
+    static func setQuotaDisplay(_ mode: String, completion: @escaping (Error?) -> Void) {
+        postForm(path: "api/quota-display", fields: ["mode": mode], completion: completion)
+    }
+
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
     /// and rescales the GIF on-board, then swaps the animation immediately.
-    static func uploadGif(_ gif: Data, slot: String, completion: @escaping (Error?) -> Void) {
+    static func uploadGif(_ gif: Data, slot: String, state: String = "work", completion: @escaping (Error?) -> Void) {
         guard let base = baseURL else {
             completion(Self.noHostError)
             return
         }
-        var req = URLRequest(url: base.appendingPathComponent("sprite/\(slot)"))
+        var req = URLRequest(url: base.appendingPathComponent("sprite/\(slot)/\(state)"))
         req.httpMethod = "POST"
-        req.timeoutInterval = 60 // on-device decode takes a few seconds
+        req.timeoutInterval = 20 // upload now returns before on-device decode
         let boundary = "aiclock-\(UUID().uuidString)"
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         var body = Data()
@@ -132,7 +154,7 @@ final class DeviceClient {
         }
         var req = URLRequest(url: base.appendingPathComponent("sprite/\(slot)/raw"))
         req.timeoutInterval = 30
-        URLSession.shared.dataTask(with: req) { data, resp, error in
+        directSession.dataTask(with: req) { data, resp, error in
             var result: Result<Data, Error>
             if let error = error {
                 result = .failure(error)
@@ -165,7 +187,7 @@ final class DeviceClient {
     }
 
     private static func run(_ req: URLRequest, completion: @escaping (Error?) -> Void) {
-        URLSession.shared.dataTask(with: req) { data, resp, error in
+        directSession.dataTask(with: req) { data, resp, error in
             var err = error
             if err == nil, let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
                 let msg = data.map { String(decoding: $0, as: UTF8.self) } ?? ""
@@ -198,7 +220,7 @@ final class DeviceClient {
         }
         var req = URLRequest(url: url)
         req.timeoutInterval = timeout
-        URLSession.shared.dataTask(with: req) { data, _, _ in
+        directSession.dataTask(with: req) { data, _, _ in
             let ok = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
                 .map { $0["mode"] is String && $0["sprite_rev"] != nil } ?? false
             DispatchQueue.main.async { completion(ok) }
