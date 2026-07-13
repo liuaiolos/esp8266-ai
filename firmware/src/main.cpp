@@ -76,7 +76,7 @@ uint32_t spriteRev = 0; // bumped on upload/reset so the Mac mirror re-fetches
 const int SCREEN_CX = SCREEN_W / 2, SCREEN_CY = SCREEN_H / 2;
 const int RING_MARGIN = 4;      // inset from screen edge
 const int RING_THICKNESS = 10;  // ring bar thickness
-const unsigned long ANIM_INTERVAL_MS = 120;  // sprite frame advance
+const unsigned long ANIM_INTERVAL_MS = 90;   // sprite frame advance
 const unsigned long FLASH_INTERVAL_MS = 400; // "urgent" flash speed
 const unsigned long SWITCH_BOTH_MS = 2000;   // both apps working: alternate fast
 const unsigned long SWITCH_IDLE_MS = 6000;   // neither working: alternate slow
@@ -179,6 +179,25 @@ CodexStatus codexStatus;
 unsigned long lastPollMs = 0;
 unsigned long lastSuccessMs = 0;
 bool everPolled = false;
+uint8_t bridgeFailCount = 0;
+unsigned long lastWiFiReconnectMs = 0;
+bool statusBaselineReady = false;
+unsigned long beepUntilMs = 0;
+const int SPEAKER_CHANNEL = 1;
+
+void triggerCompletionBeep() {
+  beepUntilMs = millis() + 120;
+  ledcWriteTone(SPEAKER_CHANNEL, 520);
+  ledcWrite(SPEAKER_CHANNEL, 24); // very soft single chime
+}
+
+void updateBeep() {
+  if (beepUntilMs != 0 && millis() >= beepUntilMs) {
+    ledcWriteTone(SPEAKER_CHANNEL, 0);
+    ledcWrite(SPEAKER_CHANNEL, 0);
+    beepUntilMs = 0;
+  }
+}
 
 // Quota values from the bridge are always "used" percentages. This preference
 // only changes how they are rendered, not the exhausted-window countdown.
@@ -306,13 +325,11 @@ int codexFrameCount() { return codexCustom ? codexCustomFrames : CODEX_SPRITE_FR
 int claudeIdleFrameCount() { return claudeIdleCustom ? claudeIdleFrames : claudeFrameCount(); }
 int codexIdleFrameCount() { return codexIdleCustom ? codexIdleFrames : codexFrameCount(); }
 
-// Draws one sprite frame centered on screen, one row at a time so we never
-// need a full-frame buffer: each row comes either from the custom LittleFS
-// file (streamed) or the compiled-in PROGMEM default (copied row-by-row).
+// Draws one sprite frame from a full-frame cache. A single pushImage call is
+// substantially smoother than issuing one SPI transaction per scanline.
 void drawSpriteFrame(bool custom, const char *file, const uint16_t *const *progmemFrames, int frameIdx, int w,
                      int h, size_t frameBytes) {
   int x0 = SCREEN_CX - w / 2, y0 = SCREEN_CY - h / 2;
-  size_t rowBytes = (size_t)w * 2;
   if (custom) {
     File f = LittleFS.open(file, "r");
     if (!f) return;
@@ -322,19 +339,11 @@ void drawSpriteFrame(bool custom, const char *file, const uint16_t *const *progm
       return;
     }
     f.close();
-    for (int r = 0; r < h; r++) {
-      memcpy(rowBuf, spriteFrameCache + (size_t)r * rowBytes, rowBytes);
-      tft.pushImage(x0, y0 + r, w, 1, rowBuf);
-      // Keep WiFi/WebServer responsive while streaming a frame from LittleFS.
-      if ((r & 3) == 3) yield();
-    }
+    tft.pushImage(x0, y0, w, h, reinterpret_cast<uint16_t *>(spriteFrameCache));
   } else {
     const uint16_t *frame = progmemFrames[frameIdx];
-    for (int r = 0; r < h; r++) {
-      memcpy_P(rowBuf, frame + (size_t)r * w, rowBytes);
-      tft.pushImage(x0, y0 + r, w, 1, rowBuf);
-      if ((r & 3) == 3) yield();
-    }
+    memcpy_P(spriteFrameCache, frame, frameBytes);
+    tft.pushImage(x0, y0, w, h, reinterpret_cast<uint16_t *>(spriteFrameCache));
   }
 }
 
@@ -1136,6 +1145,11 @@ DisplayMode effectiveMode() {
 
 void pollBridge() {
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) {
+    if (WiFi.status() != WL_CONNECTED && millis() - lastWiFiReconnectMs > 10000) {
+      lastWiFiReconnectMs = millis();
+      Serial.println("[wifi] disconnected; attempting reconnect");
+      WiFi.reconnect();
+    }
     Serial.printf("[bridge] skip poll: wifi=%d host='%s'\n", WiFi.status() == WL_CONNECTED, bridgeHost.c_str());
     return;
   }
@@ -1153,9 +1167,17 @@ void pollBridge() {
   Serial.printf("[bridge] GET %s -> %d\n", url.c_str(), code);
   if (code == HTTP_CODE_OK) {
     String payload = http.getString();
+    bool wasClaudeWorking = claudeStatus.status == "working";
+    bool wasCodexWorking = codexStatus.status == "working";
     if (parseStatusJson(payload)) {
+      bool completed = statusBaselineReady &&
+                       ((wasClaudeWorking && claudeStatus.status != "working") ||
+                        (wasCodexWorking && codexStatus.status != "working"));
       lastSuccessMs = millis();
       everPolled = true;
+      bridgeFailCount = 0;
+      statusBaselineReady = true;
+      if (completed) triggerCompletionBeep();
       Serial.printf("[bridge] claude=%s tok=%ld | codex=%s tok=%ld primary=%.0f%%\n",
                     claudeStatus.status.c_str(), claudeStatus.tokensToday,
                     codexStatus.status.c_str(), codexStatus.tokensToday, codexStatus.primaryPct);
@@ -1163,8 +1185,14 @@ void pollBridge() {
       Serial.println("[bridge] JSON parse failed");
     }
   } else {
-    claudeStatus.status = "offline";
-    codexStatus.status = "offline";
+    // Treat an isolated timeout as a transient LAN hiccup. Keep the last
+    // good state until several consecutive failures, avoiding visible
+    // offline/working flicker when the Mac briefly wakes or changes Wi-Fi.
+    if (bridgeFailCount < 255) bridgeFailCount++;
+    if (bridgeFailCount >= 3) {
+      claudeStatus.status = "offline";
+      codexStatus.status = "offline";
+    }
   }
   http.end();
   DisplayMode eff = effectiveMode();
@@ -1759,6 +1787,9 @@ void setup() {
   ledcSetup(0, BRIGHTNESS_PWM_FREQ, 8);
   ledcAttachPin(TFT_BL, 0);
   applyBrightness();
+  ledcSetup(SPEAKER_CHANNEL, 2000, 8);
+  ledcAttachPin(SPEAKER_PIN, SPEAKER_CHANNEL);
+  ledcWriteTone(SPEAKER_CHANNEL, 0);
 
   setupWiFi();
   setupWebServer();
@@ -1779,6 +1810,7 @@ void setup() {
 }
 
 void loop() {
+  updateBeep();
   processPendingSpriteDecode();
   unsigned long nowMs = millis();
 

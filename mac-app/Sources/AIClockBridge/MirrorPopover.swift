@@ -64,10 +64,10 @@ private func decodeCover(_ data: Data, w: Int, h: Int) -> CGImage? {
                    intent: .defaultIntent)
 }
 
-// MARK: - the 240x240 replica view
+// MARK: - the M5Stack Core 320x240 replica view
 
 final class MirrorView: NSView {
-    // scene state, all in the device's 240x240 logical coordinates
+    // scene state, all in the device's 320x240 logical coordinates
     var frames: [CGImage] = []
     var frameIdx = 0
     var spriteW = 120, spriteH = 120
@@ -123,12 +123,12 @@ final class MirrorView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        let scale = bounds.width / 240.0
+        let scale = bounds.width / 320.0
         ctx.saveGState()
         ctx.scaleBy(x: scale, y: scale)
 
         // panel background
-        let panel = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 240, height: 240),
+        let panel = NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 320, height: 240),
                                  xRadius: 10, yRadius: 10)
         NSColor.black.setFill()
         panel.fill()
@@ -147,12 +147,12 @@ final class MirrorView: NSView {
 
         // square quota ring: margin 4, thickness 10, clockwise from top-left
         let m: CGFloat = 4, t: CGFloat = 10
-        let side: CGFloat = 240 - 2 * m
+        let side: CGFloat = 320 - 2 * m
         let color = deviceOK ? NSColor(calibratedRed: 0, green: 0.85, blue: 0.2, alpha: 1)
                              : NSColor.darkGray
         color.setFill()
         var remaining = side * 4 * CGFloat(max(0, min(ringPct, 100)) / 100)
-        let x0 = m, y0 = m, x1 = 240 - m
+        let x0 = m, y0 = m, x1 = 320 - m
         var seg = min(remaining, side)
         if seg > 0 { NSRect(x: x0, y: y0, width: seg, height: t).fill() }          // top
         remaining -= side
@@ -168,7 +168,7 @@ final class MirrorView: NSView {
         // sprite, centered, pixel-crisp
         if !frames.isEmpty {
             let img = frames[min(frameIdx, frames.count - 1)]
-            let rect = CGRect(x: 120 - spriteW / 2, y: 120 - spriteH / 2,
+            let rect = CGRect(x: 160 - spriteW / 2, y: 120 - spriteH / 2,
                               width: spriteW, height: spriteH)
             ctx.saveGState()
             ctx.interpolationQuality = .none
@@ -193,8 +193,8 @@ final class MirrorView: NSView {
             .foregroundColor: NSColor.white,
             .paragraphStyle: style,
         ]
-        (line1 as NSString).draw(in: NSRect(x: 0, y: 188, width: 240, height: 18), withAttributes: attrs)
-        (line2 as NSString).draw(in: NSRect(x: 0, y: 206, width: 240, height: 18), withAttributes: attrs)
+        (line1 as NSString).draw(in: NSRect(x: 0, y: 188, width: 320, height: 18), withAttributes: attrs)
+        (line2 as NSString).draw(in: NSRect(x: 0, y: 206, width: 320, height: 18), withAttributes: attrs)
 
         if !deviceOK {
             let overlay: [NSAttributedString.Key: Any] = [
@@ -202,24 +202,24 @@ final class MirrorView: NSView {
                 .foregroundColor: NSColor.systemRed,
                 .paragraphStyle: style,
             ]
-            ("设备离线" as NSString).draw(in: NSRect(x: 0, y: 60, width: 240, height: 20),
+            ("设备离线" as NSString).draw(in: NSRect(x: 0, y: 60, width: 320, height: 20),
                                           withAttributes: overlay)
         }
 
         // approval pending: blink the whole border red over everything else
         if needsInput && flashOn {
-            let m: CGFloat = 4, t: CGFloat = 10, side: CGFloat = 240 - 2 * m
+            let m: CGFloat = 4, t: CGFloat = 10, side: CGFloat = 320 - 2 * m
             NSColor.systemRed.setFill()
             NSRect(x: m, y: m, width: side, height: t).fill()
             NSRect(x: m, y: 240 - m - t, width: side, height: t).fill()
             NSRect(x: m, y: m, width: t, height: side).fill()
-            NSRect(x: 240 - m - t, y: m, width: t, height: side).fill()
+            NSRect(x: 320 - m - t, y: m, width: t, height: side).fill()
         }
         ctx.restoreGState()
     }
 
     private func drawMusicScene(_ ctx: CGContext) {
-        let coverRect = CGRect(x: 56, y: 16, width: 128, height: 128)
+        let coverRect = CGRect(x: 96, y: 16, width: 128, height: 128)
         if let musicCover {
             ctx.saveGState()
             ctx.interpolationQuality = .none
@@ -233,7 +233,7 @@ final class MirrorView: NSView {
             ctx.fill(coverRect)
             let style = NSMutableParagraphStyle()
             style.alignment = .center
-            ("No Art" as NSString).draw(in: NSRect(x: 56, y: 72, width: 128, height: 20), withAttributes: [
+            ("No Art" as NSString).draw(in: NSRect(x: 96, y: 72, width: 128, height: 20), withAttributes: [
                 .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold),
                 .foregroundColor: NSColor.lightGray,
                 .paragraphStyle: style,
@@ -244,18 +244,18 @@ final class MirrorView: NSView {
         titleStyle.alignment = .center
         titleStyle.lineBreakMode = .byTruncatingTail
         let title = musicTitle.isEmpty ? "No Music" : musicTitle
-        (title as NSString).draw(in: NSRect(x: 12, y: 154, width: 216, height: 24), withAttributes: [
+        (title as NSString).draw(in: NSRect(x: 12, y: 154, width: 296, height: 24), withAttributes: [
             .font: NSFont.systemFont(ofSize: 15, weight: .bold),
             .foregroundColor: NSColor.white,
             .paragraphStyle: titleStyle,
         ])
-        (musicArtist as NSString).draw(in: NSRect(x: 12, y: 178, width: 216, height: 20), withAttributes: [
+        (musicArtist as NSString).draw(in: NSRect(x: 12, y: 178, width: 296, height: 20), withAttributes: [
             .font: NSFont.systemFont(ofSize: 12, weight: .regular),
             .foregroundColor: NSColor.lightGray,
             .paragraphStyle: titleStyle,
         ])
 
-        let bar = CGRect(x: 20, y: 210, width: 200, height: 8)
+        let bar = CGRect(x: 20, y: 210, width: 280, height: 8)
         ctx.setFillColor(NSColor.darkGray.cgColor)
         ctx.fill(bar)
         let frac = musicDuration > 0 ? max(0, min(1, musicElapsed / musicDuration)) : 0
@@ -347,7 +347,7 @@ final class MirrorView: NSView {
         let center = NSMutableParagraphStyle()
         center.alignment = .center
         ("MAC NET  -  56s" as NSString).draw(
-            in: NSRect(x: 0, y: 206, width: 240, height: 12), withAttributes: [
+            in: NSRect(x: 0, y: 206, width: 320, height: 12), withAttributes: [
                 .font: labelFont, .foregroundColor: grey, .paragraphStyle: center,
             ])
     }
@@ -385,6 +385,8 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var spriteCache: [String: (rev: Int, frames: [CGImage], w: Int, h: Int)] = [:]
     private var lastInfo: DeviceInfo?
     private var fetchingSlot: String?
+    private var infoRequestInFlight = false
+    private var consecutiveInfoFailures = 0
 
     init(service: StatusService, netMonitor: NetSpeedMonitor, nowPlaying: NowPlayingMonitor) {
         self.service = service
@@ -425,7 +427,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.topAnchor.constraint(equalTo: container.topAnchor, constant: 14),
             mirror.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             mirror.widthAnchor.constraint(equalToConstant: 288),
-            mirror.heightAnchor.constraint(equalToConstant: 288),
+            mirror.heightAnchor.constraint(equalToConstant: 216),
             modeControl.topAnchor.constraint(equalTo: mirror.bottomAnchor, constant: 12),
             modeControl.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             brightnessIcon.centerYAnchor.constraint(equalTo: brightnessSlider.centerYAnchor),
@@ -510,10 +512,15 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     private func tick() {
+        guard !infoRequestInFlight else { return }
+        infoRequestInFlight = true
         DeviceClient.fetchInfo { [weak self] result in
-            guard let self = self, self.popover.isShown else { return }
+            guard let self = self else { return }
+            self.infoRequestInFlight = false
+            guard self.popover.isShown else { return }
             switch result {
             case let .success(info):
+                self.consecutiveInfoFailures = 0
                 self.lastInfo = info
                 self.mirror.deviceOK = true
                 self.applyScene(info)
@@ -526,10 +533,14 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                     : info.mode == "music" ? "音乐播放" : "固定显示"
                 self.statusLabel.stringValue = "\(info.ip) · \(modeText) · 数据 \(info.bridge)"
             case .failure:
-                self.mirror.deviceOK = false
+                self.consecutiveInfoFailures += 1
+                // One missed LAN request is transient; only show offline after
+                // three consecutive failures and keep the last mirror scene.
+                self.mirror.deviceOK = self.consecutiveInfoFailures < 3
                 self.mirror.needsDisplay = true
                 self.statusLabel.stringValue = DeviceClient.host.isEmpty
-                    ? "未设置设备地址（右键菜单 → 设置设备地址）" : "无法连接 \(DeviceClient.host)"
+                    ? "未设置设备地址（右键菜单 → 设置设备地址）"
+                    : (self.consecutiveInfoFailures < 3 ? "设备响应较慢，正在重试…" : "无法连接 \(DeviceClient.host)")
             }
         }
     }

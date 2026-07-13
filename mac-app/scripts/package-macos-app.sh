@@ -20,6 +20,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BIN_DIR/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
 cp "$ROOT/Packaging/Info.plist" "$APP/Contents/Info.plist"
+cp "$ROOT/Packaging/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 ditto "$BIN_DIR/${APP_NAME}_${APP_NAME}.bundle" \
     "$APP/Contents/Resources/${APP_NAME}_${APP_NAME}.bundle"
 

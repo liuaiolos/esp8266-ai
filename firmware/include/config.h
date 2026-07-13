@@ -19,6 +19,7 @@
 #define DISPLAY_MODE_FILE "/display_mode.txt"
 #define BRIGHTNESS_DEFAULT 100
 #define BRIGHTNESS_PWM_FREQ 2000 // Hz; high enough to avoid visible flicker when dim
+#define SPEAKER_PIN 25
 
 // ---- Display layout (M5Stack Core Basic: 320x240 ILI9341, landscape) ----
 #define SCREEN_W 320

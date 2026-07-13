@@ -17,6 +17,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private let deviceInfoItem = NSMenuItem(title: "设备：未设置", action: nil, keyEquivalent: "")
     private var modeItems: [String: NSMenuItem] = [:]
     private var quotaDisplayItems: [String: NSMenuItem] = [:]
+    private var lastMenuRefresh = Date.distantPast
+    private var menuRefreshInFlight = false
 
     init(service: StatusService, usage: UsageFetcher, netMonitor: NetSpeedMonitor,
          nowPlaying: NowPlayingMonitor, port: UInt16) {
@@ -65,6 +67,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private func buildMenu() {
         let menu = controlMenu
         menu.delegate = self
+        // Every actionable item has an explicit target; don't make AppKit walk
+        // the responder chain while opening the menu.
+        menu.autoenablesItems = false
 
         claudeUsageItem.isEnabled = false
         codexUsageItem.isEnabled = false
@@ -136,9 +141,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     // MARK: - refresh
 
     func menuWillOpen(_ menu: NSMenu) {
-        usage.refresh()
+        // Render cached values immediately. Network/device work is deferred so
+        // the right-click menu never waits on LAN or provider APIs.
         refreshUsageLines()
-        refreshDeviceSection()
+        let now = Date()
+        guard !menuRefreshInFlight, now.timeIntervalSince(lastMenuRefresh) > 1 else { return }
+        lastMenuRefresh = now
+        menuRefreshInFlight = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.usage.refresh()
+            self.refreshDeviceSection {
+                self.menuRefreshInFlight = false
+            }
+        }
     }
 
     private func refreshUsageLines() {
@@ -168,17 +184,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         return "\(min)m"
     }
 
-    private func refreshDeviceSection() {
+    private func refreshDeviceSection(completion: (() -> Void)? = nil) {
         let host = DeviceClient.host
         guard !host.isEmpty else {
             deviceInfoItem.title = "设备：未设置地址"
             modeItems.values.forEach { $0.state = .off }
             quotaDisplayItems.values.forEach { $0.state = .off }
+            completion?()
             return
         }
         deviceInfoItem.title = "设备：\(host)（连接中…）"
         DeviceClient.fetchInfo { [weak self] result in
-            guard let self = self else { return }
+            guard let self = self else { completion?(); return }
             switch result {
             case let .success(info):
                 let sprites = [info.claudeCustomSprite ? "C:自定义" : "C:默认",
@@ -190,6 +207,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                     "设备：\(info.ip) · 正在显示 \(showing) · \(sprites.joined(separator: " "))"
                 for (mode, item) in self.modeItems { item.state = mode == info.mode ? .on : .off }
                 for (mode, item) in self.quotaDisplayItems { item.state = mode == info.quotaDisplay ? .on : .off }
+                completion?()
             case .failure:
                 self.deviceInfoItem.title = "设备：\(host)（无法连接）"
                 self.modeItems.values.forEach { $0.state = .off }
@@ -201,9 +219,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                     DeviceClient.verifyDevice(ip: seen) { ok in
                         if ok {
                             DeviceClient.host = seen
-                            self.refreshDeviceSection()
+                            self.refreshDeviceSection(completion: completion)
+                        } else {
+                            completion?()
                         }
                     }
+                } else {
+                    completion?()
                 }
             }
         }

@@ -376,3 +376,33 @@ Remove the destination bundle explicitly, then use `ditto --rsrc`.
 - **Notes**: Replaced the bundle with `rm -rf` followed by `ditto --rsrc`; codesign verification passed.
 
 ---
+## [ERR-20260712-004] build_wrong_workdir
+
+**Logged**: 2026-07-12T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: infra
+
+### Summary
+Combined firmware/client build was first run from the repository root instead of the PlatformIO project directory.
+
+### Error
+```
+NotPlatformIOProjectError: Not a PlatformIO project. platformio.ini file has not been found in current working directory
+```
+
+### Context
+- Firmware project is under `firmware/`; macOS Swift package is under `mac-app/`.
+
+### Suggested Fix
+Run PlatformIO and Swift builds in their respective project directories.
+
+### Metadata
+- Reproducible: yes
+- Related Files: firmware/platformio.ini, mac-app/Package.swift
+
+### Resolution
+- **Resolved**: 2026-07-12T00:00:00+08:00
+- **Notes**: Rebuilt successfully from both project directories.
+
+---
