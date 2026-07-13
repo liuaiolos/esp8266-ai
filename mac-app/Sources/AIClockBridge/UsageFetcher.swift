@@ -10,7 +10,7 @@ import Foundation
 // Tokens never leave this machine except toward their own vendor's API.
 
 struct ProviderUsage {
-    var primaryPct: Double?     // 5h window used %
+    var primaryPct: Double?     // session / 5h window used % (optional)
     var primaryResetMin: Int?   // minutes until it resets
     var weeklyPct: Double?      // 7d / weekly window used %
     var weeklyResetMin: Int?
@@ -70,7 +70,8 @@ final class UsageFetcher {
     }
 
     private static func merge(old: ProviderUsage, new: ProviderUsage) -> ProviderUsage {
-        if new.primaryPct == nil && new.weeklyPct == nil && old.primaryPct != nil {
+        if new.primaryPct == nil && new.weeklyPct == nil
+            && (old.primaryPct != nil || old.weeklyPct != nil) {
             var kept = old
             kept.error = new.error
             return kept
@@ -180,17 +181,16 @@ final class UsageFetcher {
             return usage
         }
         let now = Date().timeIntervalSince1970
+        // Codex historically put the 5h limit in primary_window and the
+        // weekly limit in secondary_window. When only the weekly limit is
+        // available, however, the API can put that weekly window in primary.
+        // Classify by the explicit duration; retain the old slot mapping only
+        // when an unfamiliar response omits it.
         if let w = rateLimit["primary_window"] as? [String: Any] {
-            usage.primaryPct = (w["used_percent"] as? NSNumber)?.doubleValue
-            if let reset = (w["reset_at"] as? NSNumber)?.doubleValue {
-                usage.primaryResetMin = max(0, Int((reset - now) / 60))
-            }
+            Self.applyCodexWindow(w, defaultWeekly: false, to: &usage, now: now)
         }
         if let w = rateLimit["secondary_window"] as? [String: Any] {
-            usage.weeklyPct = (w["used_percent"] as? NSNumber)?.doubleValue
-            if let reset = (w["reset_at"] as? NSNumber)?.doubleValue {
-                usage.weeklyResetMin = max(0, Int((reset - now) / 60))
-            }
+            Self.applyCodexWindow(w, defaultWeekly: true, to: &usage, now: now)
         }
         usage.fetchedAt = Date()
         return usage
@@ -238,6 +238,23 @@ final class UsageFetcher {
         }
         guard let d = date else { return nil }
         return max(0, Int((d.timeIntervalSince1970 - now) / 60))
+    }
+
+    private static func applyCodexWindow(_ window: [String: Any], defaultWeekly: Bool,
+                                         to usage: inout ProviderUsage, now: Double) {
+        let seconds = (window["limit_window_seconds"] as? NSNumber)?.doubleValue
+        let isWeekly = seconds == 7 * 24 * 60 * 60 ? true : defaultWeekly
+        let pct = (window["used_percent"] as? NSNumber)?.doubleValue
+        let reset = (window["reset_at"] as? NSNumber)?.doubleValue
+        let resetMin = reset.map { max(0, Int(($0 - now) / 60)) }
+            ?? (window["reset_after_seconds"] as? NSNumber).map { max(0, Int($0.doubleValue / 60)) }
+        if isWeekly {
+            usage.weeklyPct = pct
+            usage.weeklyResetMin = resetMin
+        } else {
+            usage.primaryPct = pct
+            usage.primaryResetMin = resetMin
+        }
     }
 
     private static func syncRequest(_ req: URLRequest) -> (Data, Int)? {

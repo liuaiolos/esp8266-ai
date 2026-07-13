@@ -163,7 +163,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private static func usageLine(name: String, u: ProviderUsage, weeklyLabel: String) -> String {
-        if let err = u.error, u.primaryPct == nil { return "\(name)：\(err)" }
+        if let err = u.error, u.primaryPct == nil, u.weeklyPct == nil { return "\(name)：\(err)" }
         var parts: [String] = []
         if let p = u.primaryPct {
             var s = "5h \(Int(p))%"

@@ -145,25 +145,38 @@ final class MirrorView: NSView {
             return
         }
 
-        // square quota ring: margin 4, thickness 10, clockwise from top-left
+        // rectangular quota ring: margin 4, thickness 10, clockwise from top-left
         let m: CGFloat = 4, t: CGFloat = 10
-        let side: CGFloat = 320 - 2 * m
+        let x0 = m, y0 = m, x1 = 320 - m
+        let y1 = 240 - m
+        let horizontal = x1 - x0
+        let vertical = y1 - y0
+        let horizontalRun = horizontal - t
+        let verticalRun = vertical - t
+        // Draw a complete muted track first, matching the device. This keeps
+        // the unfilled part legible instead of making the square look split.
+        let trackColor = NSColor(calibratedRed: 0, green: 0.24, blue: 0.06, alpha: 1)
+        trackColor.setFill()
+        NSRect(x: x0 + t, y: y0, width: horizontalRun, height: t).fill()
+        NSRect(x: x1 - t, y: y0 + t, width: t, height: verticalRun).fill()
+        NSRect(x: x0, y: y1 - t, width: horizontalRun, height: t).fill()
+        NSRect(x: x0, y: y0, width: t, height: verticalRun).fill()
         let color = deviceOK ? NSColor(calibratedRed: 0, green: 0.85, blue: 0.2, alpha: 1)
                              : NSColor.darkGray
         color.setFill()
-        var remaining = side * 4 * CGFloat(max(0, min(ringPct, 100)) / 100)
-        let x0 = m, y0 = m, x1 = 320 - m
-        var seg = min(remaining, side)
-        if seg > 0 { NSRect(x: x0, y: y0, width: seg, height: t).fill() }          // top
-        remaining -= side
-        seg = min(remaining, side)
-        if seg > 0 { NSRect(x: x1 - t, y: y0, width: t, height: seg).fill() }      // right
-        remaining -= side
-        seg = min(remaining, side)
-        if seg > 0 { NSRect(x: x1 - seg, y: 240 - m - t, width: seg, height: t).fill() } // bottom
-        remaining -= side
-        seg = min(remaining, side)
-        if seg > 0 { NSRect(x: x0, y: 240 - m - seg, width: t, height: seg).fill() }     // left
+        var remaining = 2 * (horizontalRun + verticalRun)
+            * CGFloat(max(0, min(ringPct, 100)) / 100)
+        var seg = min(remaining, horizontalRun)
+        if seg > 0 { NSRect(x: x0 + t, y: y0, width: seg, height: t).fill() }       // top
+        remaining -= horizontalRun
+        seg = min(remaining, verticalRun)
+        if seg > 0 { NSRect(x: x1 - t, y: y0 + t, width: t, height: seg).fill() }  // right
+        remaining -= verticalRun
+        seg = min(remaining, horizontalRun)
+        if seg > 0 { NSRect(x: x1 - t - seg, y: y1 - t, width: seg, height: t).fill() } // bottom
+        remaining -= horizontalRun
+        seg = min(remaining, verticalRun)
+        if seg > 0 { NSRect(x: x0, y: y1 - t - seg, width: t, height: seg).fill() } // left
 
         // sprite, centered, pixel-crisp
         if !frames.isEmpty {
@@ -592,9 +605,13 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             mirror.line2 = "Weekly " + Self.pctText(displayPct(snap.claude.sevenDayPct))
             mirror.needsInput = snap.claude.needsInput
         } else {
-            mirror.ringPct = displayPct(snap.codex.primaryPct) ?? 0
-            mirror.line1 = "5h " + Self.pctText(displayPct(snap.codex.primaryPct))
-            mirror.line2 = "Weekly " + Self.pctText(displayPct(snap.codex.weeklyPct))
+            let hasSession = snap.codex.primaryPct != nil
+            let ringPct = hasSession ? snap.codex.primaryPct : snap.codex.weeklyPct
+            mirror.ringPct = displayPct(ringPct) ?? 0
+            mirror.line1 = hasSession
+                ? "5h " + Self.pctText(displayPct(snap.codex.primaryPct))
+                : "Weekly " + Self.pctText(displayPct(snap.codex.weeklyPct))
+            mirror.line2 = hasSession ? "Weekly " + Self.pctText(displayPct(snap.codex.weeklyPct)) : ""
             mirror.needsInput = snap.codex.needsInput
         }
         mirror.needsDisplay = true

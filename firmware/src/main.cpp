@@ -1,9 +1,10 @@
-// M5Stack Core ESP32 WiFi clock: shows local time plus live Claude Code / Codex CLI
+// M5GO v2.7 ESP32 WiFi clock: shows local time plus live Claude Code / Codex CLI
 // working status and usage quota, polled from a small bridge service that
 // runs on the developer's Mac (see ../bridge/bridge.py).
 //
-// Display: 320x240 SPI ILI9341 (TFT_eSPI). Pin mapping is set via build_flags
-// in platformio.ini - edit those if your wiring differs.
+// Display: 320x240 SPI ILI9342C. TFT_eSPI supplies the M5Stack transport and
+// coordinate model; the panel-specific init sequence below follows M5Stack's
+// official M5GO v2.7/Core1 implementation. Pins are set in platformio.ini.
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -15,8 +16,10 @@
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
 #include <AnimatedGIF.h>
+#include "esp32-hal-dac.h"
 
 #include "config.h"
+#include "audio/construction_complete_pcm.h"
 #include "img/claude_sprite.h"
 #include "img/codex_sprite.h"
 #include "img/claude_logo.h"
@@ -24,6 +27,51 @@
 
 TFT_eSPI tft = TFT_eSPI();
 WebServer webServer(80);
+
+// M5GO v2.7 uses an ILI9342C panel. M5Stack's official Core1 library retains
+// the ILI9341 coordinate model but selects this different register sequence
+// for newer LCD hardware. Applying it after TFT_eSPI::init() lets the rest of
+// this firmware keep the proven 320x240 rotation and drawing coordinates.
+static void initM5GoV27Panel() {
+  auto command = [](uint8_t value) { tft.writecommand(value); };
+  auto data = [](uint8_t value) { tft.writedata(value); };
+
+  command(0xC8);
+  data(0xFF); data(0x93); data(0x42);
+
+  command(0xC0); // Power control 1
+  data(0x12); data(0x12);
+  command(0xC1); // Power control 2
+  data(0x03);
+  command(0xB0);
+  data(0xE0);
+  command(0xF6);
+  data(0x00); data(0x01); data(0x01);
+
+  command(0x36); // Memory access control; M5Stack rotation 0 baseline
+  data(0xA8);    // MY | MV, with TFT_BGR color order
+  command(0x3A); // 16-bit RGB565
+  data(0x55);
+  command(0xB6); // Display function control
+  data(0x08); data(0x82); data(0x27);
+
+  command(0xE0); // Positive gamma
+  const uint8_t positiveGamma[] = {
+      0x00, 0x0C, 0x11, 0x04, 0x11, 0x08, 0x37, 0x89,
+      0x4C, 0x06, 0x0C, 0x0A, 0x2E, 0x34, 0x0F};
+  for (uint8_t value : positiveGamma) data(value);
+
+  command(0xE1); // Negative gamma
+  const uint8_t negativeGamma[] = {
+      0x00, 0x0B, 0x11, 0x05, 0x13, 0x09, 0x33, 0x67,
+      0x48, 0x07, 0x0E, 0x0B, 0x2E, 0x33, 0x0F};
+  for (uint8_t value : negativeGamma) data(value);
+
+  command(0x11); // Sleep out
+  delay(120);
+  command(0x29); // Display on
+  tft.invertDisplay(true); // Official M5Stack ILI9342C path enables INVON
+}
 
 // ---------- custom sprite storage (LittleFS) ----------
 // Custom uploads replace the compiled-in default animation without needing a
@@ -185,10 +233,60 @@ bool statusBaselineReady = false;
 unsigned long beepUntilMs = 0;
 const int SPEAKER_CHANNEL = 1;
 
+// The supplied WAV is downsampled at build time to unsigned 8-bit mono PCM
+// (11,025 Hz) and compiled into flash. GPIO 25 is ESP32 DAC1 and feeds the
+// M5GO's built-in speaker, so this needs no SD card or LittleFS upload.
+constexpr uint32_t COMPLETION_SAMPLE_RATE = 11025;
+
+void restoreSpeakerToneOutput() {
+  dacWrite(SPEAKER_PIN, 0);
+  ledcAttachPin(SPEAKER_PIN, SPEAKER_CHANNEL);
+  ledcWriteTone(SPEAKER_CHANNEL, 0);
+  ledcWrite(SPEAKER_CHANNEL, 0);
+}
+
+void playCompletionSound() {
+  if (construction_complete_pcm_len == 0) return;
+
+  // LEDC and the DAC cannot drive GPIO 25 at the same time.
+  ledcWriteTone(SPEAKER_CHANNEL, 0);
+  ledcWrite(SPEAKER_CHANNEL, 0);
+  ledcDetachPin(SPEAKER_PIN);
+
+  // Keep the real 11,025 Hz average interval (90 + fractional microseconds)
+  // rather than relying on delayMicroseconds(), whose call overhead changes
+  // the playback pitch.
+  uint32_t nextSampleAt = micros();
+  uint32_t fractionalUs = 0;
+  constexpr uint32_t wholeUs = 1000000UL / COMPLETION_SAMPLE_RATE;
+  constexpr uint32_t remainderUs = 1000000UL % COMPLETION_SAMPLE_RATE;
+  for (size_t i = 0; i < construction_complete_pcm_len; ++i) {
+    int sample = (int)pgm_read_byte(construction_complete_pcm + i) - 128;
+    sample = sample * COMPLETION_SOUND_VOLUME_PERCENT / 100;
+    dacWrite(SPEAKER_PIN, sample + 128);
+
+    nextSampleAt += wholeUs;
+    fractionalUs += remainderUs;
+    if (fractionalUs >= COMPLETION_SAMPLE_RATE) {
+      nextSampleAt++;
+      fractionalUs -= COMPLETION_SAMPLE_RATE;
+    }
+    while ((int32_t)(micros() - nextSampleAt) < 0) {
+      // Busy wait preserves the sample clock; Wi-Fi continues on the other core.
+    }
+  }
+  restoreSpeakerToneOutput();
+}
+
 void triggerCompletionBeep() {
+  if (construction_complete_pcm_len > 0) {
+    playCompletionSound();
+    return;
+  }
+  // Kept as a safe fallback if the asset is ever removed from a custom build.
   beepUntilMs = millis() + 120;
   ledcWriteTone(SPEAKER_CHANNEL, 520);
-  ledcWrite(SPEAKER_CHANNEL, 24); // very soft single chime
+  ledcWrite(SPEAKER_CHANNEL, 24);
 }
 
 void updateBeep() {
@@ -401,15 +499,20 @@ uint16_t ringLastColor = 1;
 void drawFullBorder(uint16_t color) {
   ringLastPct = -1000; // ring got painted over; next ring draw must repaint
   int x0 = RING_MARGIN, y0 = RING_MARGIN;
-  int side = SCREEN_W - 2 * RING_MARGIN;
-  tft.fillRect(x0, y0, side, RING_THICKNESS, color);                              // top
-  tft.fillRect(x0, SCREEN_H - RING_MARGIN - RING_THICKNESS, side, RING_THICKNESS, color); // bottom
-  tft.fillRect(x0, y0, RING_THICKNESS, side, color);                              // left
-  tft.fillRect(SCREEN_W - RING_MARGIN - RING_THICKNESS, y0, RING_THICKNESS, side, color); // right
+  int horizontal = SCREEN_W - 2 * RING_MARGIN;
+  int vertical = SCREEN_H - 2 * RING_MARGIN;
+  tft.fillRect(x0, y0, horizontal, RING_THICKNESS, color); // top
+  tft.fillRect(x0, SCREEN_H - RING_MARGIN - RING_THICKNESS,
+               horizontal, RING_THICKNESS, color); // bottom
+  tft.fillRect(x0, y0, RING_THICKNESS, vertical, color); // left
+  tft.fillRect(SCREEN_W - RING_MARGIN - RING_THICKNESS, y0,
+               RING_THICKNESS, vertical, color); // right
 }
 
-// Square progress ring hugging the screen edge. `pct` of the perimeter
-// (clockwise from top-left) is drawn in `color`, the rest in dark grey.
+// Rectangular progress ring hugging the screen edge. `pct` of the perimeter
+// is drawn clockwise: full top -> full right -> full bottom -> partial left.
+// The unused portion is black; complete sides overlap at the corners so a
+// later, partial side can never erase a corner that is already complete.
 void drawSquareRing(float pct, uint16_t color) {
   if (pct < 0) pct = 0;
   if (pct > 100) pct = 100;
@@ -419,39 +522,42 @@ void drawSquareRing(float pct, uint16_t color) {
 
   int x0 = RING_MARGIN, y0 = RING_MARGIN;
   int x1 = SCREEN_W - RING_MARGIN, y1 = SCREEN_H - RING_MARGIN;
-  int side = x1 - x0;
-  float perimeter = side * 4.0;
+  int horizontal = x1 - x0;
+  int vertical = y1 - y0;
+  float perimeter = 2.0f * (horizontal + vertical);
 
-  // Unfilled track is drawn black (not grey) so it blends into the background
-  // and only the active quota portion is visible - still needs to be actively
-  // repainted each time though, to erase a previously longer fill if the
-  // percentage drops (e.g. a quota window reset).
-  tft.fillRect(x0, y0, side, RING_THICKNESS, TFT_BLACK);                  // top
-  tft.fillRect(x1 - RING_THICKNESS, y0, RING_THICKNESS, side, TFT_BLACK); // right
-  tft.fillRect(x0, y1 - RING_THICKNESS, side, RING_THICKNESS, TFT_BLACK); // bottom
-  tft.fillRect(x0, y0, RING_THICKNESS, side, TFT_BLACK);                  // left
+  // Clear all four complete sides first. Full side rectangles deliberately
+  // overlap at the corners: once a side is complete, its corner must remain
+  // filled instead of being reassigned to a later, still-incomplete side.
+  tft.fillRect(x0, y0, horizontal, RING_THICKNESS, TFT_BLACK);
+  tft.fillRect(x1 - RING_THICKNESS, y0, RING_THICKNESS, vertical, TFT_BLACK);
+  tft.fillRect(x0, y1 - RING_THICKNESS, horizontal, RING_THICKNESS, TFT_BLACK);
+  tft.fillRect(x0, y0, RING_THICKNESS, vertical, TFT_BLACK);
 
   // filled portion, clockwise: top -> right -> bottom -> left
   float remaining = perimeter * (pct / 100.0);
   if (remaining <= 0) return;
 
-  float seg = min(remaining, (float)side);
+  float seg = min(remaining, (float)horizontal);
   tft.fillRect(x0, y0, (int)seg, RING_THICKNESS, color);
-  remaining -= side;
+  remaining -= horizontal;
   if (remaining <= 0) return;
 
-  seg = min(remaining, (float)side);
-  tft.fillRect(x1 - RING_THICKNESS, y0, RING_THICKNESS, (int)seg, color);
-  remaining -= side;
+  seg = min(remaining, (float)vertical);
+  tft.fillRect(x1 - RING_THICKNESS, y0,
+               RING_THICKNESS, (int)seg, color);
+  remaining -= vertical;
   if (remaining <= 0) return;
 
-  seg = min(remaining, (float)side);
-  tft.fillRect(x1 - (int)seg, y1 - RING_THICKNESS, (int)seg, RING_THICKNESS, color);
-  remaining -= side;
+  seg = min(remaining, (float)horizontal);
+  tft.fillRect(x1 - (int)seg, y1 - RING_THICKNESS,
+               (int)seg, RING_THICKNESS, color);
+  remaining -= horizontal;
   if (remaining <= 0) return;
 
-  seg = min(remaining, (float)side);
-  tft.fillRect(x0, y1 - (int)seg, RING_THICKNESS, (int)seg, color);
+  seg = min(remaining, (float)vertical);
+  tft.fillRect(x0, y1 - (int)seg,
+               RING_THICKNESS, (int)seg, color);
 }
 
 void drawClaudeSprite(int frameIdx, bool working = true) {
@@ -474,12 +580,16 @@ String pctText(float pct) {
   return pct >= 0 ? String((int)pct) + "%" : "-";
 }
 
-// Quota readout below the sprite: two columns ("5h" / "Wk"), small grey label
-// over a big font-4 percentage. Values repaint only when their text changes
-// (force = after a full-screen clear), so status polling never flashes them.
+// Quota readout below the sprite. Normally it has 5h / Wk columns; a
+// weekly-only Codex plan uses one centered "Weekly 42%" line, matching the
+// desktop mirror. Values repaint only when their text changes (force = after
+// a full-screen clear), so status polling never flashes them.
 const int QUOTA_LABEL_Y = 183, QUOTA_VALUE_Y = 199;
 const int QUOTA_COL1_X = 70, QUOTA_COL2_X = 170;
+const int QUOTA_CLEAR_X = RING_MARGIN + RING_THICKNESS;
+const int QUOTA_CLEAR_W = SCREEN_W - 2 * QUOTA_CLEAR_X;
 String lastQuota5h, lastQuotaWk;
+bool lastQuotaHasHour = true;
 
 // Faux-bold: the packed TFT_eSPI fonts have no bold face, so draw twice with
 // a 1px x offset. Transparent draws - the caller must have cleared the region.
@@ -489,22 +599,41 @@ void drawBoldString(const String &s, int x, int y, int font, uint16_t color) {
   tft.drawString(s, x + 1, y, font);
 }
 
-void drawQuotaText(float hourPct, float weekPct, bool force) {
+void drawQuotaText(float hourPct, float weekPct, bool hasHourQuota, bool force) {
   tft.setTextDatum(TC_DATUM);
-  if (force) {
-    drawBoldString("5h", QUOTA_COL1_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
-    drawBoldString("Wk", QUOTA_COL2_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+  if (force || hasHourQuota != lastQuotaHasHour) {
+    // A layout switch must erase both the old labels and values (in
+    // particular, the former 5h column) before drawing the new arrangement.
+    // Never clear through the edge ring. At 85%, the left-side fill occupies
+    // y=168..235; the former full-width clears at y=183..224 erased its middle
+    // (and the matching right edge), leaving the isolated block seen on M5.
+    tft.fillRect(QUOTA_CLEAR_X, QUOTA_LABEL_Y, QUOTA_CLEAR_W, 18, TFT_BLACK);
+    tft.fillRect(QUOTA_CLEAR_X, QUOTA_VALUE_Y, QUOTA_CLEAR_W, 26, TFT_BLACK);
+    lastQuota5h = "";
+    lastQuotaWk = "";
+    lastQuotaHasHour = hasHourQuota;
+    if (hasHourQuota) {
+      drawBoldString("5h", QUOTA_COL1_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+      drawBoldString("Wk", QUOTA_COL2_X, QUOTA_LABEL_Y, 2, TFT_LIGHTGREY);
+    }
   }
   String v1 = pctText(hourPct), v2 = pctText(weekPct);
-  if (force || v1 != lastQuota5h) {
+  if (hasHourQuota && v1 != lastQuota5h) {
     lastQuota5h = v1;
     tft.fillRect(QUOTA_COL1_X - 50, QUOTA_VALUE_Y, 100, 26, TFT_BLACK);
     drawBoldString(v1, QUOTA_COL1_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
   }
-  if (force || v2 != lastQuotaWk) {
+  if (v2 != lastQuotaWk) {
     lastQuotaWk = v2;
-    tft.fillRect(QUOTA_COL2_X - 50, QUOTA_VALUE_Y, 100, 26, TFT_BLACK);
-    drawBoldString(v2, QUOTA_COL2_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
+    if (hasHourQuota) {
+      tft.fillRect(QUOTA_COL2_X - 50, QUOTA_VALUE_Y, 100, 26, TFT_BLACK);
+      drawBoldString(v2, QUOTA_COL2_X, QUOTA_VALUE_Y, 4, TFT_WHITE);
+    } else {
+      // There is no 5h value to pair with it, so give the weekly value the
+      // full width instead of retaining the old two-line mobile layout.
+      tft.fillRect(QUOTA_CLEAR_X, QUOTA_VALUE_Y, QUOTA_CLEAR_W, 26, TFT_BLACK);
+      drawBoldString("Weekly " + v2, SCREEN_CX, QUOTA_VALUE_Y, 4, TFT_WHITE);
+    }
   }
 }
 
@@ -617,6 +746,12 @@ float claudeRingPct() {
              : 0;
 }
 
+// A Codex response can contain only the weekly window. In that case the
+// weekly percentage becomes the main ring rather than a blank/zero 5h ring.
+float codexRingPct() {
+  return codexStatus.primaryPct >= 0 ? codexStatus.primaryPct : codexStatus.weeklyPct;
+}
+
 // Redraws whichever app is currently active, full screen: quota ring +
 // sprite (or the reset countdown while the 5h window is exhausted).
 // Full clear + repaint - only for real transitions (app switch, mode return,
@@ -630,11 +765,12 @@ void drawActiveApp() {
   if (currentApp == APP_CLAUDE) {
     drawSquareRing(displayedQuotaPct(claudeRingPct()), currentStatusColor());
     if (showingCd == CD_NONE) drawClaudeSprite(claudeFrame, claudeStatus.status == "working");
-    drawQuotaText(displayedQuotaPct(claudeRingPct()), displayedQuotaPct(claudeStatus.sevenDayPct), true);
+    drawQuotaText(displayedQuotaPct(claudeRingPct()), displayedQuotaPct(claudeStatus.sevenDayPct), true, true);
   } else {
-    drawSquareRing(max(displayedQuotaPct(codexStatus.primaryPct), 0.0f), currentStatusColor());
+    drawSquareRing(max(displayedQuotaPct(codexRingPct()), 0.0f), currentStatusColor());
     if (showingCd == CD_NONE) drawCodexSprite(codexFrame, codexStatus.status == "working");
-    drawQuotaText(displayedQuotaPct(codexStatus.primaryPct), displayedQuotaPct(codexStatus.weeklyPct), true);
+    drawQuotaText(displayedQuotaPct(codexStatus.primaryPct), displayedQuotaPct(codexStatus.weeklyPct),
+                  codexStatus.primaryPct >= 0, true);
   }
   if (showingCd != CD_NONE) drawCountdown(true);
   drawAppLogo();
@@ -649,10 +785,11 @@ void refreshActiveApp() {
   }
   if (currentApp == APP_CLAUDE) {
     drawSquareRing(displayedQuotaPct(claudeRingPct()), currentStatusColor());
-    drawQuotaText(displayedQuotaPct(claudeRingPct()), displayedQuotaPct(claudeStatus.sevenDayPct), false);
+    drawQuotaText(displayedQuotaPct(claudeRingPct()), displayedQuotaPct(claudeStatus.sevenDayPct), true, false);
   } else {
-    drawSquareRing(max(displayedQuotaPct(codexStatus.primaryPct), 0.0f), currentStatusColor());
-    drawQuotaText(displayedQuotaPct(codexStatus.primaryPct), displayedQuotaPct(codexStatus.weeklyPct), false);
+    drawSquareRing(max(displayedQuotaPct(codexRingPct()), 0.0f), currentStatusColor());
+    drawQuotaText(displayedQuotaPct(codexStatus.primaryPct), displayedQuotaPct(codexStatus.weeklyPct),
+                  codexStatus.primaryPct >= 0, false);
   }
   if (showingCd != CD_NONE) {
     syncCountdownDeadline();
@@ -666,7 +803,7 @@ void redrawRingOnly() {
   if (currentApp == APP_CLAUDE) {
     drawSquareRing(displayedQuotaPct(claudeRingPct()), currentStatusColor());
   } else {
-    drawSquareRing(max(displayedQuotaPct(codexStatus.primaryPct), 0.0f), currentStatusColor());
+    drawSquareRing(max(displayedQuotaPct(codexRingPct()), 0.0f), currentStatusColor());
   }
 }
 
@@ -1276,8 +1413,11 @@ void handleRoot() {
   html += "<tr><td>Claude</td><td>" + htmlEscape(claudeStatus.status) + ", " +
           formatTokens(claudeStatus.tokensToday) + " tok</td></tr>";
   html += "<tr><td>Codex</td><td>" + htmlEscape(codexStatus.status) + ", " +
-          formatTokens(codexStatus.tokensToday) + " tok, 5h " +
-          (codexStatus.primaryPct >= 0 ? String(codexStatus.primaryPct, 0) + "%" : "?") + "</td></tr>";
+          formatTokens(codexStatus.tokensToday) + " tok, " +
+          (codexStatus.primaryPct >= 0
+              ? "5h " + String(codexStatus.primaryPct, 0) + "%"
+              : "周 " + (codexStatus.weeklyPct >= 0 ? String(codexStatus.weeklyPct, 0) + "%" : "?")) +
+          "</td></tr>";
   html += "</table>";
 
   html += "<form method='POST' action='/reset-wifi' onsubmit=\"return confirm('清除 WiFi "
@@ -1777,11 +1917,9 @@ void setup() {
   loadCustomSpriteState();
 
   tft.init();
-  // This M5 Core panel batch uses the inverted MADCTL polarity: INVON is the
-  // normal-looking mode for it (INVOFF produces white background/magenta green).
-  tft.invertDisplay(true);
-  // Official M5Stack Basic Core orientation: ILI9341 portrait init rotated to
-  // 320x240 landscape. This also supplies the panel's correct MADCTL color order.
+  initM5GoV27Panel();
+  // M5Stack's official Core1 display wrapper uses rotation 1 after selecting
+  // the ILI9342C init path, yielding the expected 320x240 landscape canvas.
   tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
   ledcSetup(0, BRIGHTNESS_PWM_FREQ, 8);

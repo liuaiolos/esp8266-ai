@@ -120,24 +120,33 @@ sealed class MirrorControl : Control
             return;
         }
 
-        // square quota ring: margin 4, thickness 10, clockwise from top-left
+        // rectangular quota ring: margin 4, thickness 10, clockwise from top-left
         const float m = 4, t = 10;
-        const float side = 240 - 2 * m;
+        const float x0 = m, y0 = m, x1 = 240 - m, y1 = 240 - m;
+        const float horizontal = x1 - x0, vertical = y1 - y0;
+        const float horizontalRun = horizontal - t, verticalRun = vertical - t;
+        using (var track = new SolidBrush(Color.FromArgb(0, 61, 15)))
+        {
+            g.FillRectangle(track, x0 + t, y0, horizontalRun, t);                // top
+            g.FillRectangle(track, x1 - t, y0 + t, t, verticalRun);             // right
+            g.FillRectangle(track, x0, y1 - t, horizontalRun, t);               // bottom
+            g.FillRectangle(track, x0, y0, t, verticalRun);                     // left
+        }
         using (var ring = new SolidBrush(DeviceOK ? Green : Color.FromArgb(90, 90, 90)))
         {
-            var remaining = side * 4 * (float)(Math.Clamp(RingPct, 0, 100) / 100);
-            const float x0 = m, y0 = m, x1 = 240 - m;
-            var seg = Math.Min(remaining, side);
-            if (seg > 0) g.FillRectangle(ring, x0, y0, seg, t);                    // top
-            remaining -= side;
-            seg = Math.Min(remaining, side);
-            if (seg > 0) g.FillRectangle(ring, x1 - t, y0, t, seg);                // right
-            remaining -= side;
-            seg = Math.Min(remaining, side);
-            if (seg > 0) g.FillRectangle(ring, x1 - seg, 240 - m - t, seg, t);     // bottom
-            remaining -= side;
-            seg = Math.Min(remaining, side);
-            if (seg > 0) g.FillRectangle(ring, x0, 240 - m - seg, t, seg);         // left
+            var remaining = 2 * (horizontalRun + verticalRun)
+                * (float)(Math.Clamp(RingPct, 0, 100) / 100);
+            var seg = Math.Min(remaining, horizontalRun);
+            if (seg > 0) g.FillRectangle(ring, x0 + t, y0, seg, t);                // top
+            remaining -= horizontalRun;
+            seg = Math.Min(remaining, verticalRun);
+            if (seg > 0) g.FillRectangle(ring, x1 - t, y0 + t, t, seg);            // right
+            remaining -= verticalRun;
+            seg = Math.Min(remaining, horizontalRun);
+            if (seg > 0) g.FillRectangle(ring, x1 - t - seg, y1 - t, seg, t);      // bottom
+            remaining -= horizontalRun;
+            seg = Math.Min(remaining, verticalRun);
+            if (seg > 0) g.FillRectangle(ring, x0, y1 - t - seg, t, seg);          // left
         }
 
         // sprite, centered, pixel-crisp
@@ -174,10 +183,10 @@ sealed class MirrorControl : Control
         if (NeedsInput && FlashOn)
         {
             using var red = new SolidBrush(Color.FromArgb(255, 59, 48));
-            g.FillRectangle(red, m, m, side, t);
-            g.FillRectangle(red, m, 240 - m - t, side, t);
-            g.FillRectangle(red, m, m, t, side);
-            g.FillRectangle(red, 240 - m - t, m, t, side);
+            g.FillRectangle(red, x0, y0, horizontal, t);
+            g.FillRectangle(red, x0, y1 - t, horizontal, t);
+            g.FillRectangle(red, x0, y0, t, vertical);
+            g.FillRectangle(red, x1 - t, y0, t, vertical);
         }
     }
 
@@ -592,9 +601,13 @@ sealed class MirrorForm : Form
         }
         else
         {
-            _mirror.RingPct = snap.Codex.PrimaryPct ?? 0;
-            _mirror.Line1 = "5h " + PctText(snap.Codex.PrimaryPct);
-            _mirror.Line2 = "Weekly " + PctText(snap.Codex.WeeklyPct);
+            var hasSession = snap.Codex.PrimaryPct.HasValue;
+            var ringPct = hasSession ? snap.Codex.PrimaryPct : snap.Codex.WeeklyPct;
+            _mirror.RingPct = ringPct ?? 0;
+            _mirror.Line1 = hasSession
+                ? "5h " + PctText(snap.Codex.PrimaryPct)
+                : "Weekly " + PctText(snap.Codex.WeeklyPct);
+            _mirror.Line2 = hasSession ? "Weekly " + PctText(snap.Codex.WeeklyPct) : "";
             _mirror.NeedsInput = snap.Codex.NeedsInput;
         }
         _mirror.Invalidate();

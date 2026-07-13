@@ -13,7 +13,7 @@ namespace AIClockBridge;
 
 class ProviderUsage
 {
-    public double? PrimaryPct;     // 5h window used %
+    public double? PrimaryPct;     // session / 5h window used % (optional)
     public int? PrimaryResetMin;   // minutes until it resets
     public double? WeeklyPct;      // 7d / weekly window used %
     public int? WeeklyResetMin;
@@ -84,7 +84,8 @@ sealed class UsageFetcher
 
     static ProviderUsage Merge(ProviderUsage old, ProviderUsage fresh)
     {
-        if (fresh.PrimaryPct == null && fresh.WeeklyPct == null && old.PrimaryPct != null)
+        if (fresh.PrimaryPct == null && fresh.WeeklyPct == null
+            && (old.PrimaryPct != null || old.WeeklyPct != null))
         {
             return new ProviderUsage
             {
@@ -233,18 +234,13 @@ sealed class UsageFetcher
                 return usage;
             }
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+            // A weekly-only Codex account can receive the weekly window in
+            // primary_window. Use limit_window_seconds to identify it rather
+            // than treating the JSON field position as its meaning.
             if (rateLimit.TryGetProperty("primary_window", out var w1))
-            {
-                usage.PrimaryPct = NumberOrNull(w1, "used_percent");
-                var reset = NumberOrNull(w1, "reset_at");
-                if (reset.HasValue) usage.PrimaryResetMin = Math.Max(0, (int)((reset.Value - now) / 60));
-            }
+                ApplyCodexWindow(w1, defaultWeekly: false, usage, now);
             if (rateLimit.TryGetProperty("secondary_window", out var w2))
-            {
-                usage.WeeklyPct = NumberOrNull(w2, "used_percent");
-                var reset = NumberOrNull(w2, "reset_at");
-                if (reset.HasValue) usage.WeeklyResetMin = Math.Max(0, (int)((reset.Value - now) / 60));
-            }
+                ApplyCodexWindow(w2, defaultWeekly: true, usage, now);
             usage.FetchedAt = DateTime.UtcNow;
         }
         catch
@@ -327,5 +323,26 @@ sealed class UsageFetcher
         if (!DateTimeOffset.TryParse(iso, null, System.Globalization.DateTimeStyles.RoundtripKind, out var d))
             return null;
         return Math.Max(0, (int)((d - now).TotalMinutes));
+    }
+
+    static void ApplyCodexWindow(JsonElement window, bool defaultWeekly, ProviderUsage usage, double now)
+    {
+        var seconds = NumberOrNull(window, "limit_window_seconds");
+        var isWeekly = seconds == 7 * 24 * 60 * 60 ? true : defaultWeekly;
+        var pct = NumberOrNull(window, "used_percent");
+        var reset = NumberOrNull(window, "reset_at");
+        var resetAfter = NumberOrNull(window, "reset_after_seconds");
+        int? resetMin = reset.HasValue ? Math.Max(0, (int)((reset.Value - now) / 60))
+            : resetAfter.HasValue ? Math.Max(0, (int)(resetAfter.Value / 60)) : null;
+        if (isWeekly)
+        {
+            usage.WeeklyPct = pct;
+            usage.WeeklyResetMin = resetMin;
+        }
+        else
+        {
+            usage.PrimaryPct = pct;
+            usage.PrimaryResetMin = resetMin;
+        }
     }
 }

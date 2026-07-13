@@ -27,7 +27,7 @@
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>桌宠动起来 = AI 正在干活。方形进度环 + 大字显示 5 小时 / 周额度的真实用量；额度用满自动换成重置倒计时，等你审批时整圈边框红闪提醒。 |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI 工作状态"> | **AI 工作状态与额度**<br>桌宠动起来 = AI 正在干活。方形进度环 + 大字显示会话 / 周额度的真实用量；若 Codex 账户仅提供周额度，自动只显示周额度。额度用满自动换成重置倒计时，等你审批时整圈边框红闪提醒。 |
 | <img src="docs/images/feature2.jpg" width="360" alt="网速监视"> | **网速实时监视**<br>任务管理器风格的上下行曲线，56 秒滚动窗口，量程自动调整。 |
 | <img src="docs/images/music.jpg" width="360" alt="音乐播放"> | **音乐播放显示**<br>专辑封面、歌名、歌手、进度条实时同步；音乐响起自动切入，停止自动切回。 |
 | <img src="docs/images/feature3.jpg" width="360" alt="桌宠可换"> | **可换桌宠**<br>内置 [petdex.dev](https://petdex.dev) 画廊 3300+ 开源桌宠，也可上传任意 GIF，设备板上直接解码，无需重烧固件。 |
@@ -68,6 +68,38 @@
 - **屏幕边框红色闪烁**：设备连不上桥接程序——确认电脑端程序在运行、和设备在同一 WiFi。
 - **额度一直显示 `-`**：本机没有登录过 Claude Code / Codex CLI，桥接程序读不到凭据。
 - **想换桌宠**：右键托盘图标 → 「更换桌宠动画…」，挑一个点上传就行。
+
+### Codex 状态没有及时停下来 / 一直在工作
+
+桥接程序会扫描 `~/.codex/sessions` 作为兼容兜底，但日志的最后一次写入并不代表 Codex 仍在执行——特别是任务完成或等待审批时，Codex 还会继续落盘。推荐配置 Codex hooks，让生命周期事件直接推送给桥接程序；桥接会以这些事件为准，并自动在没有 hooks 时退回日志扫描。
+
+先保存下面脚本为 `~/.ai-clock/codex-status-hook.sh`，并执行 `chmod +x ~/.ai-clock/codex-status-hook.sh`：
+
+```sh
+#!/bin/sh
+event="$1"
+cat >/dev/null                         # Codex hook 的 JSON 输入无需在这里解析
+curl -fsS --connect-timeout 0.5 --max-time 1 \
+  -H 'Content-Type: application/json' \
+  -d "{\"agent\":\"codex\",\"event\":\"$event\"}" \
+  http://127.0.0.1:8765/event >/dev/null 2>&1 || true
+```
+
+然后在 `~/.codex/hooks.json` 的 `hooks` 中，为以下六个事件各加入一条 command hook：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`Stop`。command 分别填写：
+
+```text
+~/.ai-clock/codex-status-hook.sh <事件名>
+```
+
+例如 `Stop` 项可写成（保留你已有的其他 hooks）：
+
+```json
+"Stop": [{
+  "hooks": [{ "type": "command", "command": "~/.ai-clock/codex-status-hook.sh Stop", "timeout": 2 }]
+}]
+```
+
+首次运行时若 Codex 要求确认 hook，请在 Codex 中批准。`PermissionRequest` 会让屏幕停止工作动画并显示红色提醒；`Stop` 会立即结束动画，不会再被最后的 JSONL 写入误判成工作中。
 
 ## 开发
 

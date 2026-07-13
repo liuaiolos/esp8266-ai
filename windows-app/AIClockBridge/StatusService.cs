@@ -138,10 +138,9 @@ sealed class StatusService
     public Func<bool> MusicPlayingProvider;
 
     // Hook-pushed live state (POST /event from Claude Code / Codex hooks).
-    // Events beat the mtime heuristic while fresh: "working" for up to 10min
-    // (a long tool run emits nothing between PreToolUse and PostToolUse),
-    // "idle" for 60s (long enough to kill the mtime tail after Stop, short
-    // enough that a session without hooks isn't stuck idle).
+    // A transcript mtime only proves that some session wrote a file; it does
+    // not tell us whether the current turn has completed. Keep an explicit
+    // Codex lifecycle state long enough to outlive its final JSONL flush.
     record AgentEvent(string State, double At);
 
     AgentEvent _claudeEvent;
@@ -151,8 +150,8 @@ sealed class StatusService
     // event (the prompt got answered) or by TTL.
     double? _claudeNeedsInputAt;
     double? _codexNeedsInputAt;
-    const double WorkingEventTTL = 10 * 60;
-    const double IdleEventTTL = 60;
+    const double WorkingEventTTL = 2 * 60 * 60;
+    const double IdleEventTTL = 30 * 60;
     const double NeedsInputTTL = 5 * 60;
 
     static readonly HashSet<string> WorkingEvents = new()
@@ -195,6 +194,10 @@ sealed class StatusService
             {
                 if (agent == "claude") _claudeNeedsInputAt = now;
                 else if (agent == "codex") _codexNeedsInputAt = now;
+                // PermissionRequest is a turn boundary, not work. Codex often
+                // flushes JSONL while its approval UI is open; without this
+                // explicit idle state that write re-started the animation.
+                if (agent == "codex") _codexEvent = new AgentEvent("idle", now);
                 return;
             }
             string state;
@@ -210,15 +213,16 @@ sealed class StatusService
 
     static bool NeedsInput(double? at, double now) => at.HasValue && now - at.Value < NeedsInputTTL;
 
-    /// Event override, applied on top of the log-derived status. "offline"
-    /// from logs is only upgraded by a fresh working event (a live hook means
-    /// the CLI is definitely running).
+    /// Event override, applied on top of the log-derived status. A fresh hook
+    /// is authoritative: Codex writes final transcript records after Stop, so
+    /// a newer mtime must not change a completed task back to "working".
+    /// Expiry keeps log scanning as the fallback when hooks are not configured.
     static string OverrideStatus(string logStatus, AgentEvent ev, double now)
     {
         if (ev == null) return logStatus;
         var age = now - ev.At;
         if (ev.State == "working" && age < WorkingEventTTL) return "working";
-        if (ev.State == "idle" && age < IdleEventTTL && logStatus == "working") return "idle";
+        if (ev.State == "idle" && age < IdleEventTTL) return "idle";
         return logStatus;
     }
 
@@ -260,13 +264,12 @@ sealed class StatusService
                 snap.Claude.SevenDayPct = cu.WeeklyPct;
                 snap.Claude.SevenDayResetMin = cu.WeeklyResetMin;
                 var xu = Usage.Codex;
-                if (xu.PrimaryPct.HasValue)
+                // A successful weekly-only response intentionally has no
+                // primary value; remove log-derived legacy 5h data then.
+                if (xu.FetchedAt.HasValue)
                 {
                     snap.Codex.PrimaryPct = xu.PrimaryPct;
                     snap.Codex.PrimaryResetMin = xu.PrimaryResetMin;
-                }
-                if (xu.WeeklyPct.HasValue)
-                {
                     snap.Codex.WeeklyPct = xu.WeeklyPct;
                     snap.Codex.WeeklyResetMin = xu.WeeklyResetMin;
                 }

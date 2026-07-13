@@ -52,10 +52,10 @@ final class StatusService {
     var musicPlayingProvider: (() -> Bool)?
 
     // Hook-pushed live state (POST /event from Claude Code / Codex hooks).
-    // Events beat the mtime heuristic while fresh: "working" for up to 10min
-    // (a long tool run emits nothing between PreToolUse and PostToolUse),
-    // "idle" for 60s (long enough to kill the mtime tail after Stop, short
-    // enough that a session without hooks isn't stuck idle).
+    // A transcript mtime is only evidence that *some* session wrote a file;
+    // it cannot say whether the current turn completed.  For Codex, keep the
+    // explicit lifecycle state for a full idle window so a Stop event is not
+    // immediately overwritten by the final JSONL flush.
     private struct AgentEvent {
         let state: String // "working" | "idle"
         let at: TimeInterval
@@ -68,8 +68,8 @@ final class StatusService {
     // event (the prompt got answered) or by TTL.
     private var claudeNeedsInputAt: TimeInterval?
     private var codexNeedsInputAt: TimeInterval?
-    private let workingEventTTL: TimeInterval = 10 * 60
-    private let idleEventTTL: TimeInterval = 60
+    private let workingEventTTL: TimeInterval = 2 * 60 * 60
+    private let idleEventTTL: TimeInterval = 30 * 60
     private let needsInputTTL: TimeInterval = 5 * 60
 
     private static let workingEvents: Set<String> = [
@@ -110,6 +110,11 @@ final class StatusService {
         if Self.attentionEvents.contains(event) {
             if agent == "claude" { claudeNeedsInputAt = now }
             else if agent == "codex" { codexNeedsInputAt = now }
+            // PermissionRequest is a turn boundary, not work.  Mark Codex
+            // idle too: its JSONL file is often flushed while the approval UI
+            // is open, which used to make the pet keep walking underneath the
+            // red attention alert.
+            if agent == "codex" { codexEvent = AgentEvent(state: "idle", at: now) }
             return
         }
         let state: String
@@ -127,14 +132,16 @@ final class StatusService {
         return now - at < needsInputTTL
     }
 
-    /// Event override, applied on top of the log-derived status. "offline"
-    /// from logs is only upgraded by a fresh working event (a live hook means
-    /// the CLI is definitely running).
+    /// Event override, applied on top of the log-derived status.  A fresh hook
+    /// is authoritative: Codex writes its final transcript records after Stop,
+    /// so allowing a newer mtime to win would turn a completed task back into
+    /// "working".  The event eventually expires, leaving logs as a fallback
+    /// for sessions where hooks were never configured.
     private func overrideStatus(_ logStatus: String, with event: AgentEvent?, now: TimeInterval) -> String {
         guard let ev = event else { return logStatus }
         let age = now - ev.at
         if ev.state == "working", age < workingEventTTL { return "working" }
-        if ev.state == "idle", age < idleEventTTL, logStatus == "working" { return "idle" }
+        if ev.state == "idle", age < idleEventTTL { return "idle" }
         return logStatus
     }
 
@@ -182,12 +189,12 @@ final class StatusService {
             snap.claude.sevenDayPct = claudeUsage.weeklyPct
             snap.claude.sevenDayResetMin = claudeUsage.weeklyResetMin
             let codexUsage = u.codex
-            if let pct = codexUsage.primaryPct {
-                snap.codex.primaryPct = pct
+            // A successful weekly-only response intentionally has no primary
+            // value; clear any log-derived legacy 5h value in that case.
+            if codexUsage.fetchedAt != nil {
+                snap.codex.primaryPct = codexUsage.primaryPct
                 snap.codex.primaryResetMin = codexUsage.primaryResetMin
-            }
-            if let pct = codexUsage.weeklyPct {
-                snap.codex.weeklyPct = pct
+                snap.codex.weeklyPct = codexUsage.weeklyPct
                 snap.codex.weeklyResetMin = codexUsage.weeklyResetMin
             }
         }

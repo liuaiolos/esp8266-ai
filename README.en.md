@@ -27,7 +27,7 @@ A retro mini-TV with a 240×240 screen that sits on your desk showing **what Cla
 
 | | |
 |---|---|
-| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Pet is walking = the AI is working. A square progress ring plus large digits show your real 5-hour / weekly quota usage; when a window is used up the pet becomes a reset countdown, and the border flashes red when the AI is waiting for your approval. |
+| <img src="docs/images/feature1.jpg" width="360" alt="AI status"> | **AI status & quota**<br>Pet is walking = the AI is working. A square progress ring plus large digits show your real session / weekly quota usage; Codex accounts that expose only a weekly limit automatically show that limit alone. When a window is used up the pet becomes a reset countdown, and the border flashes red when the AI is waiting for your approval. |
 | <img src="docs/images/feature2.jpg" width="360" alt="Network monitor"> | **Live network monitor**<br>Task-manager-style upload/download curves, 56-second rolling window, auto-scaling axis. |
 | <img src="docs/images/music.jpg" width="360" alt="Now playing"> | **Now playing**<br>Album art, title, artist and progress bar in real time; switches in automatically when music starts, back when it stops. |
 | <img src="docs/images/feature3.jpg" width="360" alt="Swappable pets"> | **Swappable pets**<br>Built-in [petdex.dev](https://petdex.dev) gallery with 3300+ open-source pets, or upload any GIF — decoded on the board itself, no reflashing needed. |
@@ -68,6 +68,38 @@ Daily use is all on the tray icon: **left-click** opens a live mirror of the dev
 - **Screen border flashing red**: the device can't reach the bridge — make sure the app is running and on the same WiFi.
 - **Quota shows `-` forever**: no Claude Code / Codex CLI login on this machine, so the bridge has no credentials to read.
 - **Want a different pet**: right-click the tray icon → "Change pet animation…", pick one and upload.
+
+### Codex remains working after it has stopped
+
+The bridge scans `~/.codex/sessions` as a compatibility fallback, but a final transcript write does not mean that Codex is still running. Configure Codex hooks to post lifecycle events directly: the bridge treats those events as authoritative, while retaining log scanning for sessions without hooks.
+
+Save this as `~/.ai-clock/codex-status-hook.sh`, then run `chmod +x ~/.ai-clock/codex-status-hook.sh`:
+
+```sh
+#!/bin/sh
+event="$1"
+cat >/dev/null
+curl -fsS --connect-timeout 0.5 --max-time 1 \
+  -H 'Content-Type: application/json' \
+  -d "{\"agent\":\"codex\",\"event\":\"$event\"}" \
+  http://127.0.0.1:8765/event >/dev/null 2>&1 || true
+```
+
+In `~/.codex/hooks.json`, add one command hook for each of `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`. Their commands are:
+
+```text
+~/.ai-clock/codex-status-hook.sh <event name>
+```
+
+For example, retain existing hooks and add this `Stop` entry:
+
+```json
+"Stop": [{
+  "hooks": [{ "type": "command", "command": "~/.ai-clock/codex-status-hook.sh Stop", "timeout": 2 }]
+}]
+```
+
+Approve the hook in Codex if prompted. `PermissionRequest` stops the working animation and raises the red attention alert; `Stop` ends the animation immediately instead of being overwritten by Codex's final JSONL write.
 
 ## Development
 

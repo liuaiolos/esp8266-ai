@@ -406,3 +406,87 @@ Run PlatformIO and Swift builds in their respective project directories.
 - **Notes**: Rebuilt successfully from both project directories.
 
 ---
+## [ERR-20260713-001] swift_test_xctest_unavailable
+
+**Logged**: 2026-07-13T00:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: tests
+
+### Summary
+`swift test` cannot load the system XCTest module in the current command-line environment.
+
+### Error
+```
+error: no such module 'XCTest'
+```
+
+### Context
+- Command: `swift test` from `mac-app/`
+- The pre-existing `NetSpeedMonitorTests.swift` fails with the same error.
+- The executable target itself compiles successfully.
+
+### Suggested Fix
+Run the test suite with an Xcode toolchain/runtime that includes XCTest, or configure CI with that toolchain.
+
+### Metadata
+- Reproducible: yes
+- Related Files: mac-app/Tests/AIClockBridgeTests/NetSpeedMonitorTests.swift
+
+---
+
+## [ERR-20260713-002] swift_test_toolchain_mismatch
+
+**Logged**: 2026-07-13T00:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: tests
+
+### Summary
+`swift test` cannot compile the SwiftPM manifest because the active compiler and Command Line Tools SDK are from different Swift patch releases.
+
+### Error
+```
+the SDK is built with Apple Swift version 6.2.3.3.2, while this compiler is Apple Swift version 6.2.4.1.4
+```
+
+### Context
+- Command: `swift test` from `mac-app/`
+- The sandbox also prevents use of the user-level Clang module cache.
+
+### Suggested Fix
+Select a matching Xcode/Command Line Tools toolchain and direct `CLANG_MODULE_CACHE_PATH` to a writable temporary directory when running SwiftPM in the sandbox.
+
+### Metadata
+- Reproducible: yes
+- Related Files: mac-app/Package.swift
+- See Also: ERR-20260713-001
+
+---
+
+## [ERR-20260713-003] platformio_cli_unavailable
+
+**Logged**: 2026-07-13T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tests
+
+### Summary
+Firmware build could not be started because the PlatformIO CLI is absent from the current environment.
+
+### Error
+```
+zsh: command not found: pio
+```
+
+### Context
+- Command: `pio run` from `firmware/`
+
+### Suggested Fix
+Install PlatformIO Core or expose its executable on `PATH` before running the firmware build.
+
+### Metadata
+- Reproducible: yes
+- Related Files: firmware/platformio.ini
+
+---

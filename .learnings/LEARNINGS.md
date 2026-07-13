@@ -25,6 +25,41 @@ Provide a reproducible packaging script that builds the release binary, embeds i
 
 ---
 
+## [LRN-20260713-001] correction
+
+**Logged**: 2026-07-13T00:00:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: frontend
+
+### Summary
+Validate the quota percentage and rendered segment length before treating a visible M5 progress-ring segment as a panel or geometry failure.
+
+### Details
+The M5GO photo showed a pale segment on the left side of an otherwise green
+rectangular ring. The bridge reported 14% used while the device was configured
+to show remaining quota, so a roughly 14% inactive segment was mathematically
+correct. The apparent break came from forcing the inactive track to light grey
+at low backlight, which the ILI9342C panel rendered as a conspicuous pale-blue
+gap. Changing panel initialization could not fix a presentation-color issue.
+
+### Suggested Action
+Compare bridge input, quota-display mode, and expected perimeter length first.
+Keep the progress track and fill in the same hue (dark/bright green) so partial
+progress remains continuous, and synchronize the rendering across firmware,
+macOS, and Windows.
+
+### Metadata
+- Source: user_feedback
+- Related Files: firmware/src/main.cpp, mac-app/Sources/AIClockBridge/MirrorPopover.swift, windows-app/AIClockBridge/MirrorForm.cs
+- Tags: m5go, progress-ring, diagnostics, color, quota
+
+### Resolution
+- **Resolved**: 2026-07-13T00:00:00+08:00
+- **Notes**: Replaced the grey inactive segment with a dark-green continuous track, rebuilt all clients, and flashed firmware 0.4.9-m5go-v27.
+
+---
+
 ## [LRN-20260712-003] correction
 
 **Logged**: 2026-07-12T00:00:00+08:00

@@ -135,7 +135,7 @@ sealed class TrayAppContext : ApplicationContext
 
     static string UsageLine(string name, ProviderUsage u, string weeklyLabel)
     {
-        if (u.Error != null && u.PrimaryPct == null) return $"{name}：{u.Error}";
+        if (u.Error != null && u.PrimaryPct == null && u.WeeklyPct == null) return $"{name}：{u.Error}";
         var parts = new List<string>();
         if (u.PrimaryPct.HasValue)
         {
