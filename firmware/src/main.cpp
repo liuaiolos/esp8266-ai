@@ -105,6 +105,10 @@ uint16_t prevRowBuf[SCREEN_W]; // decode only: same row from the previous frame
 // avoids opening/reading LittleFS once per scanline, which otherwise starves
 // the HTTP server during the animation.
 uint8_t spriteFrameCache[CODEX_FRAME_BYTES];
+// A second frame buffer is used only at the loop seam to blend the final and
+// first animation frames. It costs 28.8 KB on this ESP32 but removes the
+// visible last-frame -> first-frame snap in non-seamless uploaded GIFs.
+uint8_t spriteLoopBridgeCache[CODEX_FRAME_BYTES];
 
 // Sprite/GIF/music payloads are stored in the byte-pre-swapped format emitted
 // by tools/convert_sprites.py. TFT_eSPI's default ESP32 pushImage() path sends
@@ -125,6 +129,7 @@ const int SCREEN_CX = SCREEN_W / 2, SCREEN_CY = SCREEN_H / 2;
 const int RING_MARGIN = 4;      // inset from screen edge
 const int RING_THICKNESS = 10;  // ring bar thickness
 const unsigned long ANIM_INTERVAL_MS = 90;   // sprite frame advance
+const unsigned long ANIM_LOOP_BRIDGE_MS = 45; // short final->first blend
 const unsigned long FLASH_INTERVAL_MS = 400; // "urgent" flash speed
 const unsigned long SWITCH_BOTH_MS = 2000;   // both apps working: alternate fast
 const unsigned long SWITCH_IDLE_MS = 6000;   // neither working: alternate slow
@@ -190,6 +195,8 @@ unsigned long lastMusicPollMs = 0;
 
 int claudeFrame = 0;
 int codexFrame = 0;
+bool claudeLoopBridgePending = false;
+bool codexLoopBridgePending = false;
 unsigned long lastAnimMs = 0;
 
 bool flashOn = true;
@@ -423,26 +430,50 @@ int codexFrameCount() { return codexCustom ? codexCustomFrames : CODEX_SPRITE_FR
 int claudeIdleFrameCount() { return claudeIdleCustom ? claudeIdleFrames : claudeFrameCount(); }
 int codexIdleFrameCount() { return codexIdleCustom ? codexIdleFrames : codexFrameCount(); }
 
+bool loadSpriteFrame(bool custom, const char *file, const uint16_t *const *progmemFrames, int frameIdx,
+                     size_t frameBytes, uint8_t *out) {
+  if (custom) {
+    File f = LittleFS.open(file, "r");
+    if (!f) return false;
+    f.seek(1 + (size_t)frameIdx * frameBytes);
+    bool ok = f.read(out, frameBytes) == (int)frameBytes;
+    f.close();
+    return ok;
+  }
+  const uint16_t *frame = progmemFrames[frameIdx];
+  memcpy_P(out, frame, frameBytes);
+  return true;
+}
+
 // Draws one sprite frame from a full-frame cache. A single pushImage call is
 // substantially smoother than issuing one SPI transaction per scanline.
 void drawSpriteFrame(bool custom, const char *file, const uint16_t *const *progmemFrames, int frameIdx, int w,
                      int h, size_t frameBytes) {
+  if (!loadSpriteFrame(custom, file, progmemFrames, frameIdx, frameBytes, spriteFrameCache)) return;
   int x0 = SCREEN_CX - w / 2, y0 = SCREEN_CY - h / 2;
-  if (custom) {
-    File f = LittleFS.open(file, "r");
-    if (!f) return;
-    f.seek(1 + (size_t)frameIdx * frameBytes);
-    if (f.read(spriteFrameCache, frameBytes) != (int)frameBytes) {
-      f.close();
-      return;
-    }
-    f.close();
-    tft.pushImage(x0, y0, w, h, reinterpret_cast<uint16_t *>(spriteFrameCache));
-  } else {
-    const uint16_t *frame = progmemFrames[frameIdx];
-    memcpy_P(spriteFrameCache, frame, frameBytes);
-    tft.pushImage(x0, y0, w, h, reinterpret_cast<uint16_t *>(spriteFrameCache));
+  tft.pushImage(x0, y0, w, h, reinterpret_cast<uint16_t *>(spriteFrameCache));
+}
+
+// A short cross-fade at the loop seam is only used while a pet is working.
+// It makes GIFs whose final pose does not exactly meet their first pose loop
+// continuously without adding a duplicate hold frame.
+void drawSpriteLoopBridge(bool custom, const char *file, const uint16_t *const *progmemFrames, int count, int w,
+                          int h, size_t frameBytes) {
+  if (count < 2 ||
+      !loadSpriteFrame(custom, file, progmemFrames, count - 1, frameBytes, spriteFrameCache) ||
+      !loadSpriteFrame(custom, file, progmemFrames, 0, frameBytes, spriteLoopBridgeCache)) return;
+  uint16_t *last = reinterpret_cast<uint16_t *>(spriteFrameCache);
+  const uint16_t *first = reinterpret_cast<const uint16_t *>(spriteLoopBridgeCache);
+  for (size_t i = 0; i < frameBytes / 2; ++i) {
+    // Sprite frames are byte-normalized for TFT_eSPI, so swap to regular
+    // RGB565 before averaging and swap back for pushImage().
+    uint16_t a = swap565(last[i]);
+    uint16_t b = swap565(first[i]);
+    uint16_t blended = ((a & 0xF7DE) >> 1) + ((b & 0xF7DE) >> 1);
+    last[i] = swap565(blended);
   }
+  int x0 = SCREEN_CX - w / 2, y0 = SCREEN_CY - h / 2;
+  tft.pushImage(x0, y0, w, h, last);
 }
 
 // ---------- helpers ----------
@@ -568,12 +599,22 @@ void drawClaudeSprite(int frameIdx, bool working = true) {
                   CLAUDE_SPRITE_W, CLAUDE_SPRITE_H, CLAUDE_FRAME_BYTES);
 }
 
+void drawClaudeLoopBridge() {
+  drawSpriteLoopBridge(claudeCustom, CLAUDE_SPRITE_FILE, claude_sprite_frames, claudeFrameCount(),
+                       CLAUDE_SPRITE_W, CLAUDE_SPRITE_H, CLAUDE_FRAME_BYTES);
+}
+
 void drawCodexSprite(int frameIdx, bool working = true) {
   int count = working ? codexFrameCount() : codexIdleFrameCount();
   if (count > 0) frameIdx %= count;
   drawSpriteFrame(working ? codexCustom : codexIdleCustom,
                   working ? CODEX_SPRITE_FILE : CODEX_IDLE_FILE, codex_sprite_frames, frameIdx,
                   CODEX_SPRITE_W, CODEX_SPRITE_H, CODEX_FRAME_BYTES);
+}
+
+void drawCodexLoopBridge() {
+  drawSpriteLoopBridge(codexCustom, CODEX_SPRITE_FILE, codex_sprite_frames, codexFrameCount(),
+                       CODEX_SPRITE_W, CODEX_SPRITE_H, CODEX_FRAME_BYTES);
 }
 
 String pctText(float pct) {
@@ -1998,14 +2039,39 @@ void loop() {
       lastAnimMs = nowMs;
       bool claudeWorking = claudeStatus.status == "working";
       bool codexWorking = codexStatus.status == "working";
+      if (!claudeWorking) claudeLoopBridgePending = false;
+      if (!codexWorking) codexLoopBridgePending = false;
+      bool drewLoopBridge = false;
       if (showingCd != CD_NONE) {
         // countdown owns the center area: no sprite frames over it
       } else if (currentApp == APP_CLAUDE && claudeWorking) {
-        claudeFrame = (claudeFrame + 1) % claudeFrameCount();
-        drawClaudeSprite(claudeFrame);
+        int count = claudeFrameCount();
+        if (claudeLoopBridgePending) {
+          claudeFrame = 0;
+          claudeLoopBridgePending = false;
+          drawClaudeSprite(claudeFrame);
+        } else if (count > 1 && claudeFrame + 1 >= count) {
+          drawClaudeLoopBridge();
+          claudeLoopBridgePending = true;
+          drewLoopBridge = true;
+        } else {
+          claudeFrame = (claudeFrame + 1) % count;
+          drawClaudeSprite(claudeFrame);
+        }
       } else if (currentApp == APP_CODEX && codexWorking) {
-        codexFrame = (codexFrame + 1) % codexFrameCount();
-        drawCodexSprite(codexFrame);
+        int count = codexFrameCount();
+        if (codexLoopBridgePending) {
+          codexFrame = 0;
+          codexLoopBridgePending = false;
+          drawCodexSprite(codexFrame);
+        } else if (count > 1 && codexFrame + 1 >= count) {
+          drawCodexLoopBridge();
+          codexLoopBridgePending = true;
+          drewLoopBridge = true;
+        } else {
+          codexFrame = (codexFrame + 1) % count;
+          drawCodexSprite(codexFrame);
+        }
       } else if (currentApp == APP_CLAUDE && claudeIdleCustom) {
         claudeFrame = (claudeFrame + 1) % claudeIdleFrameCount();
         drawClaudeSprite(claudeFrame, false);
@@ -2018,6 +2084,10 @@ void loop() {
       } else if (currentApp == APP_CODEX && codexFrame != 0) {
         codexFrame = 0;
         drawCodexSprite(codexFrame, false);
+      }
+      if (drewLoopBridge) {
+        // The bridge is a transition, not another full-duration GIF frame.
+        lastAnimMs = nowMs - (ANIM_INTERVAL_MS - ANIM_LOOP_BRIDGE_MS);
       }
     }
 
