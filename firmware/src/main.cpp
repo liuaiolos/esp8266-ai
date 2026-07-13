@@ -587,8 +587,14 @@ void drawSquareRing(float pct, uint16_t color) {
   if (remaining <= 0) return;
 
   seg = min(remaining, (float)vertical);
-  tft.fillRect(x0, y1 - (int)seg,
-               RING_THICKNESS, (int)seg, color);
+  // The bottom-left corner is already painted by the completed bottom side.
+  // If the first few pixels of the left side are drawn inside that same 10px
+  // corner they become invisible (79% is only ~3px beyond three full sides).
+  // Extend the left fill through its shared corner, so `visibleSeg` always
+  // starts immediately above the bottom edge and remains perceptible.
+  int visibleSeg = max(1, (int)ceilf(seg));
+  int leftFillHeight = min(vertical, RING_THICKNESS + visibleSeg);
+  tft.fillRect(x0, y1 - leftFillHeight, RING_THICKNESS, leftFillHeight, color);
 }
 
 void drawClaudeSprite(int frameIdx, bool working = true) {

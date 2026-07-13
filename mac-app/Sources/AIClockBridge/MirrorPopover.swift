@@ -395,7 +395,10 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private var pollTimer: Timer?
     private var animTimer: Timer?
     private var sweepTimer: Timer?
-    private var spriteCache: [String: (rev: Int, frames: [CGImage], w: Int, h: Int)] = [:]
+    // sprite_rev resets to zero after a device reboot. Pair it with the
+    // firmware version so a newly-flashed M5 cannot be mistaken for an old
+    // rev-zero sprite already cached by this popover.
+    private var spriteCache: [String: (rev: Int, firmware: String, frames: [CGImage], w: Int, h: Int)] = [:]
     private var lastInfo: DeviceInfo?
     private var fetchingSlot: String?
     private var infoRequestInFlight = false
@@ -626,7 +629,9 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         let slot = info.showing == "codex" ? "codex" : "claude"
         let w = slot == "claude" ? info.claudeW : info.codexW
         let h = slot == "claude" ? info.claudeH : info.codexH
-        if let cached = spriteCache[slot], cached.rev == info.spriteRev {
+        if let cached = spriteCache[slot],
+           cached.rev == info.spriteRev,
+           cached.firmware == info.firmwareVersion {
             mirror.frames = cached.frames
             mirror.spriteW = cached.w
             mirror.spriteH = cached.h
@@ -640,11 +645,12 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             if case let .success(data) = result {
                 let frames = decodeSpriteFrames(data, w: w, h: h)
                 guard !frames.isEmpty else { return }
-                self.spriteCache[slot] = (info.spriteRev, frames, w, h)
+                self.spriteCache[slot] = (info.spriteRev, info.firmwareVersion, frames, w, h)
                 if (self.lastInfo?.showing == "codex" ? "codex" : "claude") == slot {
                     self.mirror.frames = frames
                     self.mirror.spriteW = w
                     self.mirror.spriteH = h
+                    self.mirror.frameIdx = 0
                     self.mirror.needsDisplay = true
                 }
             }

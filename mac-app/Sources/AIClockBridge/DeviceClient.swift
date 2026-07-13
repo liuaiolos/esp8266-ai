@@ -13,6 +13,7 @@ struct DeviceInfo {
     var showing = ""
     var lastUpdateS = -1    // seconds since the device last got /status data, -1 = never
     var spriteRev = 0       // bumped by the device on animation change
+    var firmwareVersion = "" // changes on a device reflash; invalidates sprite cache
     var brightness = 100    // backlight 0-100 (0 = off)
     var quotaDisplay = "used" // used | remaining
     var claudeCustomSprite = false
@@ -80,6 +81,7 @@ final class DeviceClient {
                 info.showing = obj["showing"] as? String ?? ""
                 info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
                 info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
+                info.firmwareVersion = obj["fw"] as? String ?? ""
                 info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
                 info.quotaDisplay = obj["quota_display"] as? String ?? "used"
                 let claude = obj["claude"] as? [String: Any]
