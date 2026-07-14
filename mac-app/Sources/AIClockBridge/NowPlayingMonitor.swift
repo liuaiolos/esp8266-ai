@@ -195,6 +195,14 @@ final class NowPlayingMonitor {
         getNowPlayingInfo = unsafeBitCast(sym, to: GetNowPlayingInfoFn.self)
     }
 
+    // MediaRemote can keep returning the last snapshot after a player stops.
+    // Its elapsed time is extrapolated, so a stale positive playback rate would
+    // otherwise keep the music page active indefinitely once it reaches the
+    // end of the track.
+    private static func stalledAtEnd(_ elapsed: Double, _ duration: Double) -> Bool {
+        duration > 0 && elapsed >= duration - 0.5
+    }
+
     private func apply(info: [AnyHashable: Any]) {
         let now = Date()
         let timestamp = dateValue(info["kMRMediaRemoteNowPlayingInfoTimestamp"])
@@ -211,7 +219,7 @@ final class NowPlayingMonitor {
         next.title = stringValue(info["kMRMediaRemoteNowPlayingInfoTitle"])
         next.artist = stringValue(info["kMRMediaRemoteNowPlayingInfoArtist"])
         next.album = stringValue(info["kMRMediaRemoteNowPlayingInfoAlbum"])
-        next.playing = rate > 0.01 && !next.title.isEmpty
+        next.playing = rate > 0.01 && !next.title.isEmpty && !Self.stalledAtEnd(elapsed, duration)
         next.elapsed = elapsed
         next.duration = duration
         next.updatedAt = now
@@ -253,8 +261,8 @@ final class NowPlayingMonitor {
         next.title = title
         next.artist = artist
         next.album = album
-        next.playing = playing && !title.isEmpty
         next.elapsed = duration > 0 ? max(0, min(duration, elapsed)) : max(0, elapsed)
+        next.playing = playing && !title.isEmpty && !Self.stalledAtEnd(next.elapsed, duration)
         next.duration = duration
         next.updatedAt = now
         if shouldIgnoreAsTransientEmpty(next) { return }

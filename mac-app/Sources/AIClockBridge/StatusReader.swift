@@ -332,17 +332,27 @@ final class StatusService {
         s.tokensToday = tokensToday
         s.status = statusFromDelta(lastMtime > 0 ? now - lastMtime : 1e9)
         if let rl = latestRateLimits {
-            let primary = rl["primary"] as? [String: Any]
-            let secondary = rl["secondary"] as? [String: Any]
-            s.primaryPct = (primary?["used_percent"] as? NSNumber)?.doubleValue
-            s.primaryWindowMin = (primary?["window_minutes"] as? NSNumber)?.intValue
-            if let reset = (primary?["resets_at"] as? NSNumber)?.doubleValue {
-                s.primaryResetMin = max(0, Int((reset - now) / 60))
-            }
-            s.weeklyPct = (secondary?["used_percent"] as? NSNumber)?.doubleValue
-            s.weeklyWindowMin = (secondary?["window_minutes"] as? NSNumber)?.intValue
-            if let reset = (secondary?["resets_at"] as? NSNumber)?.doubleValue {
-                s.weeklyResetMin = max(0, Int((reset - now) / 60))
+            // Codex can place its weekly limit in the "primary" slot when the
+            // 5h window is absent. Classify each window by its duration instead
+            // of trusting the slot name, matching UsageFetcher.
+            for (key, fallbackMin) in [("primary", 300), ("secondary", 7 * 1440)] {
+                guard let w = rl[key] as? [String: Any] else { continue }
+                let pct = (w["used_percent"] as? NSNumber)?.doubleValue
+                let windowMin = (w["window_minutes"] as? NSNumber)?.intValue
+                let resetMin = (w["resets_at"] as? NSNumber).map {
+                    max(0, Int(($0.doubleValue - now) / 60))
+                }
+                if (windowMin ?? fallbackMin) >= 2 * 1440 {
+                    if s.weeklyPct == nil {
+                        s.weeklyPct = pct
+                        s.weeklyWindowMin = windowMin
+                        s.weeklyResetMin = resetMin
+                    }
+                } else if s.primaryPct == nil {
+                    s.primaryPct = pct
+                    s.primaryWindowMin = windowMin
+                    s.primaryResetMin = resetMin
+                }
             }
         }
         return s
