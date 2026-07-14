@@ -104,16 +104,31 @@ Approve the hook in Codex if prompted. `PermissionRequest` stops the working ani
 ## Development
 
 ```
-firmware/     ESP8266 firmware (PlatformIO + Arduino, with on-board GIF decoding)
+firmware/     M5Stack Core ESP32 firmware (PlatformIO + Arduino, with on-board GIF decoding)
 mac-app/      macOS menu bar bridge (Swift/SPM, zero third-party dependencies)
 windows-app/  Windows tray bridge (C# / .NET 8 WinForms)
 tools/        GIF → RGB565 built-in sprite conversion script
 docs/         Developer docs (pinout, HTTP API, architecture details)
 ```
 
+### Build, test, and package
+
+Install PlatformIO, the Xcode/Swift toolchain, and the .NET 8 SDK for the Windows bridge. Run these from the repository root. If `pio` is not on `PATH`, use `~/.platformio/penv/bin/pio` instead.
+
 ```bash
-cd firmware && pio run -t upload   # firmware: build + flash over USB
-cd mac-app && swift run            # Mac bridge: run locally
+# Firmware (M5Stack Core ESP32)
+cd firmware && pio run -e m5stack-core-esp32
+cd firmware && pio run -e m5stack-core-esp32 -t upload --upload-port /dev/cu.usbserial-…
+
+# macOS bridge: run, test, and create a Release app bundle
+cd mac-app && swift run
+cd mac-app && swift test
+cd mac-app && ./scripts/package-macos-app.sh release  # dist/AI Clock Bridge.app
+
+# Windows bridge: build, run, and publish
+cd windows-app && dotnet build AIClockBridge/AIClockBridge.csproj
+cd windows-app && dotnet run --project AIClockBridge/AIClockBridge.csproj
+cd windows-app && dotnet publish AIClockBridge/AIClockBridge.csproj -c Release -r win-x64 --self-contained false
 ```
 
 Hardware pinout, display-driver gotchas, the device HTTP API and the on-board GIF decoding architecture are documented in **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** (Chinese).

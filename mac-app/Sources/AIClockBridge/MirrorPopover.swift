@@ -381,7 +381,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let nowPlaying: NowPlayingMonitor
     private let popover = NSPopover()
     private let mirror = MirrorView()
-    private let modeControl = NSSegmentedControl(labels: ["自动", "Claude", "Codex", "网速", "音乐"],
+    private let modeControl = NSSegmentedControl(labels: ["自动", "Codex", "Claude", "网速", "音乐"],
                                                  trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "连接设备中…")
     private let brightnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100,
@@ -542,7 +542,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 self.applyScene(info)
                 self.ensureSprite(info)
                 self.syncBrightness(info)
-                let modeIdx = ["auto": 0, "claude": 1, "codex": 2, "net": 3, "music": 4][info.mode] ?? 0
+                let modeIdx = ["auto": 0, "codex": 1, "claude": 2, "net": 3, "music": 4][info.mode] ?? 0
                 self.modeControl.selectedSegment = modeIdx
                 let modeText = info.mode == "auto" ? "自动切换"
                     : info.mode == "net" ? "网速曲线"
@@ -688,7 +688,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func modeChanged() {
-        let mode = ["auto", "claude", "codex", "net", "music"][max(0, modeControl.selectedSegment)]
+        let mode = ["auto", "codex", "claude", "net", "music"][max(0, modeControl.selectedSegment)]
         DeviceClient.setDisplayMode(mode) { [weak self] _ in self?.tick() }
     }
 }

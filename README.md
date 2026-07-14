@@ -104,16 +104,31 @@ curl -fsS --connect-timeout 0.5 --max-time 1 \
 ## 开发
 
 ```
-firmware/     ESP8266 固件（PlatformIO + Arduino，含板上 GIF 解码）
+firmware/     M5Stack Core ESP32 固件（PlatformIO + Arduino，含板上 GIF 解码）
 mac-app/      macOS 菜单栏桥接（Swift/SPM，零第三方依赖）
 windows-app/  Windows 托盘桥接（C# / .NET 8 WinForms）
 tools/        GIF → RGB565 内置精灵图转换脚本
 docs/         开发文档（硬件引脚、HTTP API、架构细节）
 ```
 
+### 构建、测试与打包
+
+需要 PlatformIO、Xcode/Swift 工具链，以及 Windows 桥接程序所需的 .NET 8 SDK。以下命令均从仓库根目录开始执行；若 `pio` 未加入 `PATH`，可用 `~/.platformio/penv/bin/pio` 替代。
+
 ```bash
-cd firmware && pio run -t upload   # 固件：编译 + USB 烧录
-cd mac-app && swift run            # Mac 桥接：本地跑起来
+# 固件（M5Stack Core ESP32）
+cd firmware && pio run -e m5stack-core-esp32
+cd firmware && pio run -e m5stack-core-esp32 -t upload --upload-port /dev/cu.usbserial-…
+
+# macOS 桥接：运行、测试、Release 应用包
+cd mac-app && swift run
+cd mac-app && swift test
+cd mac-app && ./scripts/package-macos-app.sh release  # dist/AI Clock Bridge.app
+
+# Windows 桥接：构建、运行、发布单文件
+cd windows-app && dotnet build AIClockBridge/AIClockBridge.csproj
+cd windows-app && dotnet run --project AIClockBridge/AIClockBridge.csproj
+cd windows-app && dotnet publish AIClockBridge/AIClockBridge.csproj -c Release -r win-x64 --self-contained false
 ```
 
 硬件引脚表、屏幕驱动的坑、设备 HTTP API、GIF 板上解码架构等细节见 **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)**。

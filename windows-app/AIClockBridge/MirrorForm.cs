@@ -348,8 +348,8 @@ sealed class MirrorForm : Form
     readonly NowPlayingMonitor _nowPlaying;
     readonly MirrorControl _mirror = new();
     readonly RadioButton[] _modeButtons;
-    static readonly string[] Modes = { "auto", "claude", "codex", "net", "music" };
-    static readonly string[] ModeLabels = { "自动", "Claude", "Codex", "网速", "音乐" };
+    static readonly string[] Modes = { "codex", "claude", "auto", "net", "music" };
+    static readonly string[] ModeLabels = { "Codex", "Claude", "自动", "网速", "音乐" };
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();

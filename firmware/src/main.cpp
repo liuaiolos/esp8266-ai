@@ -135,7 +135,9 @@ const unsigned long SWITCH_BOTH_MS = 2000;   // both apps working: alternate fas
 const unsigned long SWITCH_IDLE_MS = 6000;   // neither working: alternate slow
 
 enum ActiveApp { APP_CLAUDE, APP_CODEX };
-ActiveApp currentApp = APP_CLAUDE;
+// First boot should introduce the device with Codex on screen.  A previously
+// saved display-mode preference still takes precedence in loadDisplayMode().
+ActiveApp currentApp = APP_CODEX;
 unsigned long lastSwitchMs = 0;
 
 // Display override, settable from the Mac app via POST /api/display:
@@ -1445,7 +1447,7 @@ void handleRoot() {
           "立刻替换动画，无需重新编译或烧录。GIF 太大可能因内存不足解码失败，换小一点的即可。</p>";
   html += "<form id='gifForm' method='POST' enctype='multipart/form-data' onsubmit='return setGifAction()'>";
   html += "<label>角色</label>";
-  html += "<select id='gifTarget'><option value='claude'>Claude</option><option value='codex'>Codex</option></select>";
+  html += "<select id='gifTarget'><option value='codex'>Codex</option><option value='claude'>Claude</option></select>";
   html += "<label>GIF 文件</label><input type='file' name='file' accept='.gif' required>";
   html += "<button type='submit'>上传并应用</button>";
   html += "</form>";
@@ -1457,14 +1459,14 @@ void handleRoot() {
   html += "<tr><td>WiFi SSID</td><td>" + htmlEscape(WiFi.SSID()) + "</td></tr>";
   html += "<tr><td>设备 IP</td><td>" + WiFi.localIP().toString() + "</td></tr>";
   html += "<tr><td>上次桥接更新</td><td>" + age + "</td></tr>";
-  html += "<tr><td>Claude</td><td>" + htmlEscape(claudeStatus.status) + ", " +
-          formatTokens(claudeStatus.tokensToday) + " tok</td></tr>";
   html += "<tr><td>Codex</td><td>" + htmlEscape(codexStatus.status) + ", " +
           formatTokens(codexStatus.tokensToday) + " tok, " +
           (codexStatus.primaryPct >= 0
               ? "5h " + String(codexStatus.primaryPct, 0) + "%"
               : "周 " + (codexStatus.weeklyPct >= 0 ? String(codexStatus.weeklyPct, 0) + "%" : "?")) +
           "</td></tr>";
+  html += "<tr><td>Claude</td><td>" + htmlEscape(claudeStatus.status) + ", " +
+          formatTokens(claudeStatus.tokensToday) + " tok</td></tr>";
   html += "</table>";
 
   html += "<form method='POST' action='/reset-wifi' onsubmit=\"return confirm('清除 WiFi "

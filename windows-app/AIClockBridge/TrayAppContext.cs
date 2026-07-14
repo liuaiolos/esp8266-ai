@@ -78,8 +78,8 @@ sealed class TrayAppContext : ApplicationContext
         var displayMenu = new ToolStripMenuItem("屏幕显示");
         foreach (var (title, mode) in new[]
         {
-            ("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
-            ("固定 Codex", "codex"), ("网速曲线", "net"), ("音乐播放", "music"),
+            ("固定 Codex", "codex"), ("固定 Claude", "claude"),
+            ("自动（谁在干活显示谁）", "auto"), ("网速曲线", "net"), ("音乐播放", "music"),
         })
         {
             var item = new ToolStripMenuItem(title);

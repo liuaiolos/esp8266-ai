@@ -85,8 +85,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(makeItem("打开设备网页", #selector(openDevicePage)))
 
         let displayMenu = NSMenu()
-        for (title, mode) in [("自动（谁在干活显示谁）", "auto"), ("固定 Claude", "claude"),
-                              ("固定 Codex", "codex"), ("网速曲线", "net"),
+        for (title, mode) in [("自动（谁在干活显示谁）", "auto"), ("固定 Codex", "codex"),
+                              ("固定 Claude", "claude"), ("网速曲线", "net"),
                               ("音乐播放", "music")] {
             let item = NSMenuItem(title: title, action: #selector(setDisplayMode(_:)), keyEquivalent: "")
             item.target = self
