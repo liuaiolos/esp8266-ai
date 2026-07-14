@@ -556,7 +556,8 @@ sealed class MirrorForm : Form
         var modeText = info.Mode == "auto" ? "自动切换"
             : info.Mode == "net" ? "网速曲线"
             : info.Mode == "music" ? "音乐播放" : "固定显示";
-        _statusLabel.Text = $"{info.Ip} · {modeText} · 数据 {info.Bridge}";
+        var transport = info.Wired ? "USB 串口直连" : "Wi-Fi 网络";
+        _statusLabel.Text = $"{info.Ip} · {modeText} · {transport}";
     }
 
     /// Quota lines & ring exactly as the firmware computes them from /status.

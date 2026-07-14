@@ -1,7 +1,7 @@
 #pragma once
 
 // ---- Firmware version (shown on the first-time WiFi setup screen & /api/info) ----
-#define FW_VERSION "0.5.5-m5go-v27"
+#define FW_VERSION "0.5.5-m5go-v26"
 
 // ---- Bridge polling ----
 #define BRIDGE_DEFAULT_PORT 8765
@@ -22,6 +22,6 @@
 #define SPEAKER_PIN 25
 #define COMPLETION_SOUND_VOLUME_PERCENT 42
 
-// ---- Display layout (M5GO v2.7: 320x240 ILI9342C, landscape) ----
+// ---- Display layout (M5GO v2.6: 320x240 ILI9342C, landscape) ----
 #define SCREEN_W 320
 #define SCREEN_H 240

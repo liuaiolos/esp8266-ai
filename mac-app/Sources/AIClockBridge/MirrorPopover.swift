@@ -547,7 +547,8 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 let modeText = info.mode == "auto" ? "自动切换"
                     : info.mode == "net" ? "网速曲线"
                     : info.mode == "music" ? "音乐播放" : "固定显示"
-                self.statusLabel.stringValue = "\(info.ip) · \(modeText) · 数据 \(info.bridge)"
+                let transport = info.wired ? "USB 串口直连" : "Wi-Fi 网络"
+                self.statusLabel.stringValue = "\(info.ip) · \(modeText) · \(transport)"
             case .failure:
                 self.consecutiveInfoFailures += 1
                 // One missed LAN request is transient; only show offline after

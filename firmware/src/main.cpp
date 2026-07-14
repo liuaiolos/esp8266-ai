@@ -1,10 +1,10 @@
-// M5GO v2.7 ESP32 WiFi clock: shows local time plus live Claude Code / Codex CLI
+// M5GO v2.6 ESP32 WiFi clock: shows local time plus live Claude Code / Codex CLI
 // working status and usage quota, polled from a small bridge service that
 // runs on the developer's Mac (see ../bridge/bridge.py).
 //
 // Display: 320x240 SPI ILI9342C. TFT_eSPI supplies the M5Stack transport and
 // coordinate model; the panel-specific init sequence below follows M5Stack's
-// official M5GO v2.7/Core1 implementation. Pins are set in platformio.ini.
+// official M5GO v2.6/Core implementation. Pins are set in platformio.ini.
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -28,11 +28,11 @@
 TFT_eSPI tft = TFT_eSPI();
 WebServer webServer(80);
 
-// M5GO v2.7 uses an ILI9342C panel. M5Stack's official Core1 library retains
+// M5GO v2.6 uses an ILI9342C panel. M5Stack's official Core library retains
 // the ILI9341 coordinate model but selects this different register sequence
 // for newer LCD hardware. Applying it after TFT_eSPI::init() lets the rest of
 // this firmware keep the proven 320x240 rotation and drawing coordinates.
-static void initM5GoV27Panel() {
+static void initM5GoV26Panel() {
   auto command = [](uint8_t value) { tft.writecommand(value); };
   auto data = [](uint8_t value) { tft.writedata(value); };
 
@@ -236,6 +236,8 @@ CodexStatus codexStatus;
 unsigned long lastPollMs = 0;
 unsigned long lastSuccessMs = 0;
 bool everPolled = false;
+bool mainUiShown = false;      // false while the Wi-Fi configuration portal is visible
+bool webServerStarted = false; // deferred because the portal also occupies port 80
 uint8_t bridgeFailCount = 0;
 unsigned long lastWiFiReconnectMs = 0;
 bool statusBaselineReady = false;
@@ -1058,6 +1060,29 @@ void netDrawTick() {
   drawNetChart();
 }
 
+// Ingests one /net payload from either HTTP polling or a USB serial frame.
+bool handleNetPayload(const String &payload) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload)) return false;
+  netCurRx = doc["rx_bps"] | 0L;
+  netCurTx = doc["tx_bps"] | 0L;
+  netHeaderDirty = true;
+  long seq = doc["seq"] | -1L;
+  JsonArray rx = doc["rx"], tx = doc["tx"];
+  int n = min(rx.size(), tx.size());
+  int fresh = (netSeq < 0) ? min(n, 8) : (int)min((long)n, seq - netSeq);
+  if (fresh < 0) fresh = 0;
+  for (int i = n - fresh; i < n; i++) {
+    if (netQCount >= NET_QUEUE) break;
+    int tail = (netQHead + netQCount) % NET_QUEUE;
+    netQRx[tail] = rx[i].as<long>();
+    netQTx[tail] = tx[i].as<long>();
+    netQCount++;
+  }
+  if (seq >= 0) netSeq = seq;
+  return true;
+}
+
 // Refills the sample queue from the bridge's /net endpoint. The seq field
 // tells us which samples we've already queued, so overlapping tails are fine.
 void pollNet() {
@@ -1068,28 +1093,7 @@ void pollNet() {
   http.setTimeout(BRIDGE_HTTP_TIMEOUT_MS);
   if (!http.begin(client, url)) return;
   int code = http.GET();
-  if (code == HTTP_CODE_OK) {
-    JsonDocument doc;
-    if (!deserializeJson(doc, http.getString())) {
-      netCurRx = doc["rx_bps"] | 0L;
-      netCurTx = doc["tx_bps"] | 0L;
-      netHeaderDirty = true;
-      long seq = doc["seq"] | -1L;
-      JsonArray rx = doc["rx"], tx = doc["tx"];
-      int n = min(rx.size(), tx.size());
-      // how many of the tail samples are new to us
-      int fresh = (netSeq < 0) ? min(n, 8) : (int)min((long)n, seq - netSeq);
-      if (fresh < 0) fresh = 0;
-      for (int i = n - fresh; i < n; i++) {
-        if (netQCount >= NET_QUEUE) break; // queue full: drop the excess
-        int tail = (netQHead + netQCount) % NET_QUEUE;
-        netQRx[tail] = rx[i].as<long>();
-        netQTx[tail] = tx[i].as<long>();
-        netQCount++;
-      }
-      if (seq >= 0) netSeq = seq;
-    }
-  }
+  if (code == HTTP_CODE_OK) handleNetPayload(http.getString());
   http.end();
 }
 
@@ -1253,31 +1257,36 @@ void pollMusic() {
 
 // ---------- WiFi / bridge polling ----------
 
+WiFiManager wifiManager; // kept global so its non-blocking portal can run from loop()
+
 void configModeCallback(WiFiManager *wm) {
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("WiFi setup needed", 8, 40, 2);
-  tft.drawString("Connect phone to AP:", 8, 70, 2);
+  tft.drawString("WiFi setup needed", 8, 32, 2);
+  tft.drawString("Connect phone to AP:", 8, 62, 2);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString(WIFI_PORTAL_AP_NAME, 8, 95, 2);
+  tft.drawString(WIFI_PORTAL_AP_NAME, 8, 87, 2);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("then open 192.168.4.1", 8, 125, 2);
+  tft.drawString("then open 192.168.4.1", 8, 117, 2);
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.drawString("Or plug into USB", 8, 155, 2);
+  tft.drawString("for wired status", 8, 178, 2);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
   tft.drawString("Firmware v" FW_VERSION, 8, 215, 2);
 }
 
 void setupWiFi() {
-  WiFiManager wm;
-  wm.setAPCallback(configModeCallback);
+  wifiManager.setAPCallback(configModeCallback);
+  wifiManager.setConfigPortalBlocking(false);
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString("Connecting WiFi...", 8, 100, 2);
 
-  Serial.println("[wifi] starting WiFiManager autoConnect...");
-  bool ok = wm.autoConnect(WIFI_PORTAL_AP_NAME);
+  Serial.println("[wifi] starting WiFiManager autoConnect (non-blocking portal)...");
+  bool ok = wifiManager.autoConnect(WIFI_PORTAL_AP_NAME);
   // Keep the HTTP admin endpoint responsive on this battery-powered ESP32;
   // modem-sleep can otherwise add multi-second stalls while the TFT is busy.
   WiFi.setSleep(false);
@@ -1324,7 +1333,7 @@ bool parseStatusJson(const String &payload) {
 DisplayMode effectiveMode() {
   if (displayMode == MODE_AUTO) {
     if (claudeStatus.needsInput || codexStatus.needsInput) return MODE_AUTO;
-    if (statusMusicPlaying) return MODE_MUSIC;
+    if (statusMusicPlaying && WiFi.status() == WL_CONNECTED) return MODE_MUSIC;
   }
   return displayMode;
 }
@@ -1387,6 +1396,95 @@ void pollBridge() {
     // in place so the poll doesn't flash the whole display.
     if (updateActiveApp()) drawActiveApp();
     else refreshActiveApp();
+  }
+}
+
+// ---------- wired USB serial bridge ----------
+// When the clock is connected by USB, the macOS bridge pushes the same status
+// and network JSON it normally serves over HTTP. This works without Wi-Fi and
+// bypasses AP client isolation. Non-protocol serial logs are ignored.
+unsigned long lastSerialFrameMs = 0;
+bool wiredEverLinked = false;
+char serialLine[1600];
+size_t serialLineLen = 0;
+
+bool wiredActive() { return wiredEverLinked && millis() - lastSerialFrameMs < 15000UL; }
+
+void showMainUiIfNeeded() {
+  if (mainUiShown) return;
+  mainUiShown = true;
+  drawStaticChrome();
+  updateActiveApp();
+  drawActiveApp();
+}
+
+void handleSerialFrame(char *line) {
+  lastSerialFrameMs = millis();
+  wiredEverLinked = true;
+  if (!strncmp(line, "#HELLO", 6)) {
+    Serial.printf("#DEVICE {\"name\":\"aiclock\",\"fw\":\"%s\"}\n", FW_VERSION);
+    return;
+  }
+  if (!strncmp(line, "#STATUS ", 8)) {
+    bool wasClaudeWorking = claudeStatus.status == "working";
+    bool wasCodexWorking = codexStatus.status == "working";
+    if (parseStatusJson(String(line + 8))) {
+      bool completed = statusBaselineReady &&
+                       ((wasClaudeWorking && claudeStatus.status != "working") ||
+                        (wasCodexWorking && codexStatus.status != "working"));
+      lastSuccessMs = millis();
+      everPolled = true;
+      bridgeFailCount = 0;
+      statusBaselineReady = true;
+      if (completed) triggerCompletionBeep();
+      showMainUiIfNeeded();
+      DisplayMode eff = effectiveMode();
+      if (eff != MODE_NET && eff != MODE_MUSIC) {
+        if (updateActiveApp()) drawActiveApp();
+        else refreshActiveApp();
+      }
+    }
+    return;
+  }
+  if (!strncmp(line, "#NET ", 5)) {
+    handleNetPayload(String(line + 5));
+    return;
+  }
+  if (!strncmp(line, "#CMD ", 5)) {
+    JsonDocument doc;
+    if (deserializeJson(doc, line + 5)) return;
+    if (doc["brightness"].is<int>()) {
+      brightness = constrain(doc["brightness"].as<int>(), 0, 100);
+      applyBrightness();
+      saveBrightness();
+    }
+    const char *mode = doc["display"] | (const char *)nullptr;
+    if (mode) {
+      String value(mode);
+      if (value == "auto") displayMode = MODE_AUTO;
+      else if (value == "claude") displayMode = MODE_CLAUDE;
+      else if (value == "codex") displayMode = MODE_CODEX;
+      else if (value == "net") displayMode = MODE_NET;
+      else if (value == "music") displayMode = MODE_MUSIC;
+      saveDisplayMode();
+    }
+  }
+}
+
+void pumpSerial() {
+  while (Serial.available()) {
+    char ch = (char)Serial.read();
+    if (ch == '\n' || ch == '\r') {
+      if (serialLineLen > 0 && serialLine[0] == '#') {
+        serialLine[serialLineLen] = 0;
+        handleSerialFrame(serialLine);
+      }
+      serialLineLen = 0;
+    } else if (serialLineLen < sizeof(serialLine) - 1) {
+      serialLine[serialLineLen++] = ch;
+    } else {
+      serialLineLen = 0;
+    }
   }
 }
 
@@ -1459,6 +1557,7 @@ void handleRoot() {
   html += "<tr><td>WiFi SSID</td><td>" + htmlEscape(WiFi.SSID()) + "</td></tr>";
   html += "<tr><td>设备 IP</td><td>" + WiFi.localIP().toString() + "</td></tr>";
   html += "<tr><td>上次桥接更新</td><td>" + age + "</td></tr>";
+  html += "<tr><td>数据连接</td><td>" + String(wiredActive() ? "USB 串口直连" : "Wi-Fi 网络") + "</td></tr>";
   html += "<tr><td>Codex</td><td>" + htmlEscape(codexStatus.status) + ", " +
           formatTokens(codexStatus.tokensToday) + " tok, " +
           (codexStatus.primaryPct >= 0
@@ -1511,6 +1610,7 @@ void handleApiInfo() {
   doc["sprite_rev"] = spriteRev;
   doc["brightness"] = brightness;
   doc["quota_display"] = showQuotaRemaining ? "remaining" : "used";
+  doc["wired"] = wiredActive();
   doc["fw"] = FW_VERSION;
   JsonObject c = doc["claude"].to<JsonObject>();
   c["status"] = claudeStatus.status;
@@ -1940,9 +2040,17 @@ void webServerTask(void *) {
   }
 }
 
+void startWebServerIfNeeded() {
+  if (webServerStarted || WiFi.status() != WL_CONNECTED) return;
+  setupWebServer();
+  webServerStarted = true;
+  xTaskCreatePinnedToCore(webServerTask, "http", 6144, nullptr, 1, nullptr, 0);
+}
+
 // ---------- Arduino entry points ----------
 
 void setup() {
+  Serial.setRxBufferSize(2048);
   Serial.begin(115200);
   // The M5 custom partition is explicitly named "littlefs". A freshly
   // flashed volume is blank, so format that exact partition once on failure
@@ -1966,7 +2074,7 @@ void setup() {
   loadCustomSpriteState();
 
   tft.init();
-  initM5GoV27Panel();
+  initM5GoV26Panel();
   // M5Stack's official Core1 display wrapper uses rotation 1 after selecting
   // the ILI9342C init path, yielding the expected 320x240 landscape canvas.
   tft.setRotation(1);
@@ -1979,24 +2087,31 @@ void setup() {
   ledcWriteTone(SPEAKER_CHANNEL, 0);
 
   setupWiFi();
-  setupWebServer();
-  xTaskCreatePinnedToCore(webServerTask, "http", 6144, nullptr, 1, nullptr, 0);
-
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("WiFi connected", 8, 70, 2);
-  tft.drawString("Admin page:", 8, 100, 2);
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("http://" + WiFi.localIP().toString(), 8, 125, 2);
-  delay(3000);
-
-  drawStaticChrome();
-  drawActiveApp();
-  pollBridge();
+  if (WiFi.status() == WL_CONNECTED) {
+    startWebServerIfNeeded();
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("WiFi connected", 8, 70, 2);
+    tft.drawString("Admin page:", 8, 100, 2);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawString("http://" + WiFi.localIP().toString(), 8, 125, 2);
+    delay(3000);
+    showMainUiIfNeeded();
+    pollBridge();
+  }
 }
 
 void loop() {
+  wifiManager.process();
+  pumpSerial();
+  if (!webServerStarted && WiFi.status() == WL_CONNECTED) {
+    startWebServerIfNeeded();
+    showMainUiIfNeeded();
+    lastPollMs = 0;
+  }
+  if (!mainUiShown) return;
+
   updateBeep();
   processPendingSpriteDecode();
   unsigned long nowMs = millis();
@@ -2126,9 +2241,10 @@ void loop() {
     }
   }
 
-  // status poll continues in every mode (feeds /api/info and the web page)
+  // While serial frames are fresh, use the wired payloads exclusively to
+  // avoid duplicate updates and make AP client isolation irrelevant.
   if (nowMs - lastPollMs >= BRIDGE_POLL_INTERVAL_MS) {
     lastPollMs = nowMs;
-    pollBridge();
+    if (!wiredActive()) pollBridge();
   }
 }

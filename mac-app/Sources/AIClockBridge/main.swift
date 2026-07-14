@@ -43,6 +43,11 @@ let nowPlaying = NowPlayingMonitor()
 nowPlaying.start()
 service.musicPlayingProvider = { nowPlaying.snapshot.playing }
 
+// USB is a wired fallback for AP client isolation or an unconfigured clock.
+// Quit the bridge before flashing, so it does not compete for the serial port.
+let serialLink = SerialLink(service: service, netMonitor: netMonitor)
+serialLink.start()
+
 let server = HTTPServer(port: port, routes: [
     "/": { service.snapshot().jsonData() },
     "/status": { service.snapshot().jsonData() },

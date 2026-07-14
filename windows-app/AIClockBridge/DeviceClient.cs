@@ -18,6 +18,7 @@ class DeviceInfo
     public string Mode = "auto";       // configured: auto | claude | codex | net | music
     public string Effective = "auto";  // what's actually on screen (AUTO may promote to music)
     public string Showing = "";
+    public bool Wired;                // true while the device is receiving USB serial frames
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
     public int SpriteRev;              // bumped by the device on animation change
     public int Brightness = 100;       // backlight 0-100 (0 = off)
@@ -100,6 +101,7 @@ static class DeviceClient
                 SpriteRev = Int(root, "sprite_rev"),
                 Brightness = Int(root, "brightness", 100),
                 Showing = Str(root, "showing"),
+                Wired = Bool(root, "wired"),
             };
             info.Effective = Str(root, "effective", info.Mode);
             if (root.TryGetProperty("claude", out var claude))

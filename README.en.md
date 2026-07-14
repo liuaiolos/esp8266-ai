@@ -63,6 +63,10 @@ The bridge lives in your menu bar / tray and **auto-discovers and pairs** with t
 
 Daily use is all on the tray icon: **left-click** opens a live mirror of the device screen (with a brightness slider at the bottom), **right-click** opens the full menu (quota details, screen switching, pet swapping, music/network pages, and more).
 
+### Optional USB wired connection
+
+If the Wi-Fi network isolates clients, or you do not want to configure Wi-Fi yet, keep the macOS bridge running and connect the clock by USB data cable. The bridge automatically discovers the CH340 serial port and pushes status and network data to the device. Quit the bridge before flashing firmware so two programs do not compete for the serial port.
+
 ## FAQ
 
 - **Screen border flashing red**: the device can't reach the bridge — make sure the app is running and on the same WiFi.

@@ -11,6 +11,7 @@ struct DeviceInfo {
     var mode = "auto"       // configured: auto | claude | codex | net | music
     var effective = "auto"  // what's actually on screen (AUTO may promote to music)
     var showing = ""
+    var wired = false        // true while the device is receiving USB serial frames
     var lastUpdateS = -1    // seconds since the device last got /status data, -1 = never
     var spriteRev = 0       // bumped by the device on animation change
     var firmwareVersion = "" // changes on a device reflash; invalidates sprite cache
@@ -79,6 +80,7 @@ final class DeviceClient {
                 info.mode = obj["mode"] as? String ?? "auto"
                 info.effective = obj["effective"] as? String ?? info.mode
                 info.showing = obj["showing"] as? String ?? ""
+                info.wired = obj["wired"] as? Bool ?? false
                 info.lastUpdateS = (obj["last_update_s"] as? NSNumber)?.intValue ?? -1
                 info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
                 info.firmwareVersion = obj["fw"] as? String ?? ""
