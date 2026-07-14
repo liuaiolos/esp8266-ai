@@ -387,10 +387,15 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let brightnessSlider = NSSlider(value: 100, minValue: 0, maxValue: 100,
                                             target: nil, action: nil)
     private let brightnessValueLabel = NSTextField(labelWithString: "100%")
+    private let volumeSlider = NSSlider(value: 72, minValue: 0, maxValue: 100,
+                                        target: nil, action: nil)
+    private let volumeValueLabel = NSTextField(labelWithString: "72%")
     // Drag streams many slider events; posts to the single-threaded ESP8266 web
     // server are throttled mid-drag and the final value always flushes on mouse-up.
     private var pendingBrightness: Int?
     private var lastBrightnessSentAt = Date.distantPast
+    private var pendingVolume: Int?
+    private var lastVolumeSentAt = Date.distantPast
 
     private var pollTimer: Timer?
     private var animTimer: Timer?
@@ -416,7 +421,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
 
     private func makeContent() -> NSViewController {
         let vc = NSViewController()
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 316, height: 424))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 316, height: 456))
 
         modeControl.target = self
         modeControl.action = #selector(modeChanged)
@@ -434,8 +439,21 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         let brightnessIcon = NSImageView(image: NSImage(systemSymbolName: "sun.max.fill",
                                                         accessibilityDescription: "亮度") ?? NSImage())
         brightnessIcon.contentTintColor = .secondaryLabelColor
+        volumeSlider.target = self
+        volumeSlider.action = #selector(volumeChanged)
+        volumeSlider.isContinuous = true
+        volumeValueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        volumeValueLabel.textColor = .secondaryLabelColor
+        volumeValueLabel.alignment = .right
+        let volumeIcon = NSButton(image: NSImage(systemSymbolName: "speaker.wave.2.fill",
+                                                 accessibilityDescription: "试听完成提示音") ?? NSImage(),
+                                  target: self, action: #selector(previewSound))
+        volumeIcon.isBordered = false
+        volumeIcon.toolTip = "试听完成提示音"
+        volumeIcon.contentTintColor = .secondaryLabelColor
 
-        for v in [mirror, modeControl, brightnessIcon, brightnessSlider, brightnessValueLabel, statusLabel] {
+        for v in [mirror, modeControl, brightnessIcon, brightnessSlider, brightnessValueLabel,
+                  volumeIcon, volumeSlider, volumeValueLabel, statusLabel] {
             v.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(v)
         }
@@ -454,7 +472,15 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             brightnessValueLabel.centerYAnchor.constraint(equalTo: brightnessSlider.centerYAnchor),
             brightnessValueLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
             brightnessValueLabel.widthAnchor.constraint(equalToConstant: 40),
-            statusLabel.topAnchor.constraint(equalTo: brightnessSlider.bottomAnchor, constant: 8),
+            volumeIcon.centerYAnchor.constraint(equalTo: volumeSlider.centerYAnchor),
+            volumeIcon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            volumeSlider.topAnchor.constraint(equalTo: brightnessSlider.bottomAnchor, constant: 6),
+            volumeSlider.leadingAnchor.constraint(equalTo: volumeIcon.trailingAnchor, constant: 8),
+            volumeSlider.trailingAnchor.constraint(equalTo: volumeValueLabel.leadingAnchor, constant: -8),
+            volumeValueLabel.centerYAnchor.constraint(equalTo: volumeSlider.centerYAnchor),
+            volumeValueLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            volumeValueLabel.widthAnchor.constraint(equalToConstant: 40),
+            statusLabel.topAnchor.constraint(equalTo: volumeSlider.bottomAnchor, constant: 8),
             statusLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
             statusLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
         ])
@@ -478,6 +504,26 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         pendingBrightness = nil
         lastBrightnessSentAt = Date()
         DeviceClient.setBrightness(level) { _ in }
+    }
+
+    @objc private func volumeChanged() {
+        let level = Int(volumeSlider.doubleValue.rounded())
+        volumeValueLabel.stringValue = "\(level)%"
+        let isFinal = NSApp.currentEvent.map { $0.type != .leftMouseDragged } ?? true
+        pendingVolume = level
+        if !isFinal && Date().timeIntervalSince(lastVolumeSentAt) < 0.25 { return }
+        flushVolume()
+    }
+
+    private func flushVolume() {
+        guard let level = pendingVolume else { return }
+        pendingVolume = nil
+        lastVolumeSentAt = Date()
+        DeviceClient.setVolume(level) { _ in }
+    }
+
+    @objc private func previewSound() {
+        DeviceClient.previewSound { _ in }
     }
 
     func toggle(relativeTo button: NSStatusBarButton) {
@@ -542,6 +588,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
                 self.applyScene(info)
                 self.ensureSprite(info)
                 self.syncBrightness(info)
+                self.syncVolume(info)
                 let modeIdx = ["auto": 0, "codex": 1, "claude": 2, "net": 3, "music": 4][info.mode] ?? 0
                 self.modeControl.selectedSegment = modeIdx
                 let modeText = info.mode == "auto" ? "自动切换"
@@ -569,6 +616,13 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
               Date().timeIntervalSince(lastBrightnessSentAt) > 2 else { return }
         brightnessSlider.doubleValue = Double(info.brightness)
         brightnessValueLabel.stringValue = "\(info.brightness)%"
+    }
+
+    private func syncVolume(_ info: DeviceInfo) {
+        guard pendingVolume == nil,
+              Date().timeIntervalSince(lastVolumeSentAt) > 2 else { return }
+        volumeSlider.doubleValue = Double(info.volume)
+        volumeValueLabel.stringValue = "\(info.volume)%"
     }
 
     /// Quota lines & ring exactly as the firmware computes them from /status.

@@ -16,6 +16,7 @@ struct DeviceInfo {
     var spriteRev = 0       // bumped by the device on animation change
     var firmwareVersion = "" // changes on a device reflash; invalidates sprite cache
     var brightness = 100    // backlight 0-100 (0 = off)
+    var volume = 72         // completion sound 0-100 (0 = muted)
     var quotaDisplay = "used" // used | remaining
     var claudeCustomSprite = false
     var codexCustomSprite = false
@@ -85,6 +86,7 @@ final class DeviceClient {
                 info.spriteRev = (obj["sprite_rev"] as? NSNumber)?.intValue ?? 0
                 info.firmwareVersion = obj["fw"] as? String ?? ""
                 info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
+                info.volume = (obj["volume"] as? NSNumber)?.intValue ?? 72
                 info.quotaDisplay = obj["quota_display"] as? String ?? "used"
                 let claude = obj["claude"] as? [String: Any]
                 let codex = obj["codex"] as? [String: Any]
@@ -115,6 +117,16 @@ final class DeviceClient {
     /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
     static func setBrightness(_ level: Int, completion: @escaping (Error?) -> Void) {
         postForm(path: "api/brightness", fields: ["level": String(level)], completion: completion)
+    }
+
+    /// POST /api/volume level=0-100 (0 = muted); device persists it.
+    static func setVolume(_ level: Int, completion: @escaping (Error?) -> Void) {
+        postForm(path: "api/volume", fields: ["level": String(level)], completion: completion)
+    }
+
+    /// POST /api/preview-sound; plays the completion sound at the saved volume.
+    static func previewSound(completion: @escaping (Error?) -> Void) {
+        postForm(path: "api/preview-sound", fields: [:], completion: completion)
     }
 
     /// POST /api/quota-display mode=used|remaining; device persists the choice.

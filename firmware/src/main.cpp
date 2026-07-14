@@ -243,9 +243,15 @@ unsigned long lastWiFiReconnectMs = 0;
 bool statusBaselineReady = false;
 unsigned long beepUntilMs = 0;
 const int SPEAKER_CHANNEL = 1;
+int completionVolume = COMPLETION_SOUND_VOLUME_DEFAULT; // 0-100
+// HTTP handlers run on Core 0, while the Arduino loop (and Hook completion)
+// runs on the app core. Queue preview playback so its DAC timing matches the
+// normal completion path instead of competing with Wi-Fi on the HTTP core.
+volatile bool previewSoundRequested = false;
 
-// The supplied WAV is downsampled at build time to unsigned 8-bit mono PCM
-// (11,025 Hz) and compiled into flash. GPIO 25 is ESP32 DAC1 and feeds the
+// The supplied WAV is peak-normalized and low-pass downsampled at build time to
+// unsigned 8-bit mono PCM (11,025 Hz), a stable rate for GPIO 25's direct DAC.
+// GPIO 25 is ESP32 DAC1 and feeds the
 // M5GO's built-in speaker, so this needs no SD card or LittleFS upload.
 constexpr uint32_t COMPLETION_SAMPLE_RATE = 11025;
 
@@ -273,7 +279,7 @@ void playCompletionSound() {
   constexpr uint32_t remainderUs = 1000000UL % COMPLETION_SAMPLE_RATE;
   for (size_t i = 0; i < construction_complete_pcm_len; ++i) {
     int sample = (int)pgm_read_byte(construction_complete_pcm + i) - 128;
-    sample = sample * COMPLETION_SOUND_VOLUME_PERCENT / 100;
+    sample = sample * completionVolume / 100;
     dacWrite(SPEAKER_PIN, sample + 128);
 
     nextSampleAt += wholeUs;
@@ -383,6 +389,22 @@ void saveBrightness() {
   File f = LittleFS.open(BRIGHTNESS_FILE, "w");
   if (!f) return;
   f.println(brightness);
+  f.close();
+}
+
+void loadCompletionVolume() {
+  if (!LittleFS.exists(COMPLETION_VOLUME_FILE)) return;
+  File f = LittleFS.open(COMPLETION_VOLUME_FILE, "r");
+  if (!f) return;
+  int v = f.readStringUntil('\n').toInt();
+  f.close();
+  if (v >= 0 && v <= 100) completionVolume = v;
+}
+
+void saveCompletionVolume() {
+  File f = LittleFS.open(COMPLETION_VOLUME_FILE, "w");
+  if (!f) return;
+  f.println(completionVolume);
   f.close();
 }
 
@@ -1458,6 +1480,11 @@ void handleSerialFrame(char *line) {
       applyBrightness();
       saveBrightness();
     }
+    if (doc["volume"].is<int>()) {
+      completionVolume = constrain(doc["volume"].as<int>(), 0, 100);
+      saveCompletionVolume();
+    }
+    if (doc["preview_sound"] == true) triggerCompletionBeep();
     const char *mode = doc["display"] | (const char *)nullptr;
     if (mode) {
       String value(mode);
@@ -1531,6 +1558,16 @@ void handleRoot() {
           "'application/x-www-form-urlencoded'},body:'level='+this.value})\">";
   html += "<div style='font-size:13px;color:#555'>当前：<span id='briv'>" + String(brightness) +
           "%</span>（0 = 熄屏，设置立即生效并记住）</div>";
+
+  html += "<h2 style='font-size:16px;margin-top:28px'>完成提示音音量</h2>";
+  html += "<input type='range' min='0' max='100' value='" + String(completionVolume) + "' id='vol' "
+          "oninput=\"document.getElementById('volv').textContent=this.value+'%'\" "
+          "onchange=\"fetch('/api/volume',{method:'POST',headers:{'Content-Type':"
+          "'application/x-www-form-urlencoded'},body:'level='+this.value})\">";
+  html += "<div style='font-size:13px;color:#555'>当前：<span id='volv'>" + String(completionVolume) +
+          "%</span>（0 = 静音，设置会保存）</div>";
+  html += "<button type='button' onclick=\"fetch('/api/preview-sound',{method:'POST'})\" "
+          "style='margin-top:8px;padding:7px 12px;font-size:13px'>试听提示音</button>";
 
   html += "<h2 style='font-size:16px;margin-top:28px'>额度显示</h2>";
   html += "<select id='quota' onchange=\"fetch('/api/quota-display',{method:'POST',headers:{'Content-Type':"
@@ -1609,6 +1646,7 @@ void handleApiInfo() {
   doc["last_update_s"] = everPolled ? (long)((millis() - lastSuccessMs) / 1000) : -1;
   doc["sprite_rev"] = spriteRev;
   doc["brightness"] = brightness;
+  doc["volume"] = completionVolume;
   doc["quota_display"] = showQuotaRemaining ? "remaining" : "used";
   doc["wired"] = wiredActive();
   doc["fw"] = FW_VERSION;
@@ -1666,6 +1704,23 @@ void handleApiBrightness() {
   saveBrightness();
   Serial.printf("[api] brightness = %d\n", brightness);
   webServer.send(200, "text/plain", "ok");
+}
+
+void handleApiVolume() {
+  String levelArg = webServer.arg("level");
+  if (levelArg.length() == 0) {
+    webServer.send(400, "text/plain", "missing level (0-100)");
+    return;
+  }
+  completionVolume = constrain(levelArg.toInt(), 0, 100);
+  saveCompletionVolume();
+  Serial.printf("[api] completion volume = %d\n", completionVolume);
+  webServer.send(200, "text/plain", "ok");
+}
+
+void handleApiPreviewSound() {
+  previewSoundRequested = true;
+  webServer.send(202, "text/plain", "queued");
 }
 
 void handleApiQuotaDisplay() {
@@ -2007,6 +2062,8 @@ void setupWebServer() {
   webServer.on("/api/display", HTTP_POST, handleApiDisplay);
   webServer.on("/api/bridge", HTTP_POST, handleApiBridge);
   webServer.on("/api/brightness", HTTP_POST, handleApiBrightness);
+  webServer.on("/api/volume", HTTP_POST, handleApiVolume);
+  webServer.on("/api/preview-sound", HTTP_POST, handleApiPreviewSound);
   webServer.on("/api/quota-display", HTTP_POST, handleApiQuotaDisplay);
   webServer.on("/sprite/claude/reset", HTTP_POST, []() { handleSpriteReset(APP_CLAUDE); });
   webServer.on("/sprite/codex/reset", HTTP_POST, []() { handleSpriteReset(APP_CODEX); });
@@ -2069,6 +2126,7 @@ void setup() {
   }
   loadBridgeHost();
   loadBrightness();
+  loadCompletionVolume();
   loadQuotaDisplay();
   loadDisplayMode();
   loadCustomSpriteState();
@@ -2105,6 +2163,10 @@ void setup() {
 void loop() {
   wifiManager.process();
   pumpSerial();
+  if (previewSoundRequested) {
+    previewSoundRequested = false;
+    triggerCompletionBeep();
+  }
   if (!webServerStarted && WiFi.status() == WL_CONNECTED) {
     startWebServerIfNeeded();
     showMainUiIfNeeded();

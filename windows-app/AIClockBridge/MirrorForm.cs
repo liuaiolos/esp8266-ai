@@ -353,10 +353,14 @@ sealed class MirrorForm : Form
     readonly Label _statusLabel = new();
     readonly TrackBar _brightness = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _brightnessValue = new();
+    readonly TrackBar _volume = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
+    readonly Label _volumeValue = new();
     // Drag streams many scroll events; posts to the single-threaded ESP8266 web
     // server are throttled mid-drag and the final value always flushes on mouse-up.
     int? _pendingBrightness;
     DateTime _lastBrightnessSentAt = DateTime.MinValue;
+    int? _pendingVolume;
+    DateTime _lastVolumeSentAt = DateTime.MinValue;
 
     readonly System.Windows.Forms.Timer _pollTimer = new() { Interval = 1000 };
     readonly System.Windows.Forms.Timer _animTimer = new() { Interval = 120 };
@@ -383,7 +387,7 @@ sealed class MirrorForm : Form
         BackColor = SystemColors.Control;
         Padding = new Padding(1);
 
-        ClientSize = new Size(Px(316), Px(424));
+        ClientSize = new Size(Px(316), Px(456));
 
         _mirror.SetBounds(Px(14), Px(14), Px(288), Px(288));
         Controls.Add(_mirror);
@@ -425,7 +429,29 @@ sealed class MirrorForm : Form
         _brightnessValue.Text = "100%";
         Controls.Add(_brightnessValue);
 
-        _statusLabel.SetBounds(Px(10), Px(378), Px(296), Px(36));
+        var volumeLabel = new Label
+        {
+            Text = "🔊",
+            TextAlign = ContentAlignment.MiddleCenter,
+            ForeColor = SystemColors.GrayText,
+        };
+        volumeLabel.SetBounds(Px(12), Px(378), Px(24), Px(26));
+        volumeLabel.Cursor = Cursors.Hand;
+        volumeLabel.Click += (_, _) => _ = DeviceClient.PreviewSound();
+        volumeLabel.AccessibleName = "试听完成提示音";
+        Controls.Add(volumeLabel);
+        _volume.SetBounds(Px(36), Px(378), Px(216), Px(26));
+        _volume.Scroll += (_, _) => OnVolumeInput(final: false);
+        _volume.MouseUp += (_, _) => OnVolumeInput(final: true);
+        Controls.Add(_volume);
+        _volumeValue.SetBounds(Px(254), Px(378), Px(48), Px(26));
+        _volumeValue.TextAlign = ContentAlignment.MiddleRight;
+        _volumeValue.ForeColor = SystemColors.GrayText;
+        _volumeValue.Font = new Font("Microsoft YaHei UI", 8.5f);
+        _volumeValue.Text = "72%";
+        Controls.Add(_volumeValue);
+
+        _statusLabel.SetBounds(Px(10), Px(410), Px(296), Px(36));
         _statusLabel.TextAlign = ContentAlignment.MiddleCenter;
         _statusLabel.ForeColor = SystemColors.GrayText;
         _statusLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
@@ -516,6 +542,32 @@ sealed class MirrorForm : Form
         _brightnessValue.Text = $"{level}%";
     }
 
+    void OnVolumeInput(bool final)
+    {
+        var level = _volume.Value;
+        _volumeValue.Text = $"{level}%";
+        _pendingVolume = level;
+        if (!final && (DateTime.Now - _lastVolumeSentAt).TotalMilliseconds < 250) return;
+        FlushVolume();
+    }
+
+    void FlushVolume()
+    {
+        if (_pendingVolume is not int level) return;
+        _pendingVolume = null;
+        _lastVolumeSentAt = DateTime.Now;
+        _ = DeviceClient.SetVolume(level);
+    }
+
+    void SyncVolume(DeviceInfo info)
+    {
+        if (_pendingVolume != null ||
+            (DateTime.Now - _lastVolumeSentAt).TotalSeconds < 2) return;
+        var level = Math.Clamp(info.Volume, 0, 100);
+        _volume.Value = level;
+        _volumeValue.Text = $"{level}%";
+    }
+
     /// One sweep step: push the newest 4Hz sample, refresh the DL/UL readout.
     void SweepTick()
     {
@@ -549,6 +601,7 @@ sealed class MirrorForm : Form
         ApplyScene(info);
         EnsureSprite(info);
         SyncBrightness(info);
+        SyncVolume(info);
         var modeIdx = Math.Max(0, Array.IndexOf(Modes, info.Mode));
         _applyingMode = true;
         _modeButtons[modeIdx].Checked = true;

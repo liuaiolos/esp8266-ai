@@ -15,12 +15,13 @@
 
 // ---- Backlight ----
 #define BRIGHTNESS_FILE "/brightness.txt"
+#define COMPLETION_VOLUME_FILE "/completion_volume.txt"
 #define QUOTA_DISPLAY_FILE "/quota_display.txt"
 #define DISPLAY_MODE_FILE "/display_mode.txt"
 #define BRIGHTNESS_DEFAULT 100
 #define BRIGHTNESS_PWM_FREQ 2000 // Hz; high enough to avoid visible flicker when dim
 #define SPEAKER_PIN 25
-#define COMPLETION_SOUND_VOLUME_PERCENT 42
+#define COMPLETION_SOUND_VOLUME_DEFAULT 72
 
 // ---- Display layout (M5GO v2.6: 320x240 ILI9342C, landscape) ----
 #define SCREEN_W 320

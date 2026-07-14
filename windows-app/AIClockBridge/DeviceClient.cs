@@ -22,6 +22,7 @@ class DeviceInfo
     public int LastUpdateS = -1;       // seconds since the device last got /status data, -1 = never
     public int SpriteRev;              // bumped by the device on animation change
     public int Brightness = 100;       // backlight 0-100 (0 = off)
+    public int Volume = 72;            // completion sound 0-100 (0 = muted)
     public bool ClaudeCustomSprite;
     public bool CodexCustomSprite;
     public int ClaudeW = 111, ClaudeH = 120;
@@ -100,6 +101,7 @@ static class DeviceClient
                 LastUpdateS = Int(root, "last_update_s", -1),
                 SpriteRev = Int(root, "sprite_rev"),
                 Brightness = Int(root, "brightness", 100),
+                Volume = Int(root, "volume", 72),
                 Showing = Str(root, "showing"),
                 Wired = Bool(root, "wired"),
             };
@@ -135,6 +137,14 @@ static class DeviceClient
     /// POST /api/brightness  level=0-100 (0 = backlight off); device persists it
     public static Task SetBrightness(int level) =>
         PostForm("api/brightness", new() { ["level"] = level.ToString() });
+
+    /// POST /api/volume level=0-100 (0 = muted); device persists it.
+    public static Task SetVolume(int level) =>
+        PostForm("api/volume", new() { ["level"] = level.ToString() });
+
+    /// POST /api/preview-sound; plays the completion sound at the saved volume.
+    public static Task PreviewSound() =>
+        PostForm("api/preview-sound", new());
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
     /// and rescales the GIF on-board, then swaps the animation immediately.

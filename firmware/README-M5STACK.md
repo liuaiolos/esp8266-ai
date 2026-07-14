@@ -15,3 +15,19 @@ cd firmware
 
 固件使用 16MB 分区表：两套各约 6.25MB 的 OTA 应用分区，以及约 3.44MB LittleFS 分区，
 用于保存桥接地址、亮度设置和上传的 GIF 桌宠。
+
+## 更新完成提示音
+
+提示音源文件是 `assets/construction_complete.wav`（22.05 kHz、16-bit、单声道）。修改它后，
+在仓库根目录运行以下命令重新生成固件使用的 PCM 头文件，再正常编译烧录：
+
+```sh
+python3 tools/convert_completion_sound.py \
+  firmware/assets/construction_complete.wav \
+  firmware/include/audio/construction_complete_pcm.h
+```
+
+转换会把音频峰值规范到 92%，并以成对平均方式降采样到稳定的 11.025 kHz；不要直接编辑
+`include/audio/construction_complete_pcm.h`。
+
+完成提示音音量可在设备网页或桌面桥接的滑块中设为 0–100%，并保存到 LittleFS；默认值为 72%。
