@@ -16,7 +16,17 @@
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
 #include <AnimatedGIF.h>
+#if defined(HAS_DAC_SPEAKER)
 #include "esp32-hal-dac.h"
+#endif
+#if defined(XIAOZHI_S3_LCD154)
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+#include <driver/i2s_std.h>
+#else
+#include <driver/i2s.h>
+#endif
+#include <math.h>
+#endif
 
 #include "config.h"
 #include "audio/construction_complete_pcm.h"
@@ -32,6 +42,7 @@ WebServer webServer(80);
 // the ILI9341 coordinate model but selects this different register sequence
 // for newer LCD hardware. Applying it after TFT_eSPI::init() lets the rest of
 // this firmware keep the proven 320x240 rotation and drawing coordinates.
+#if defined(M5STACK)
 static void initM5GoV26Panel() {
   auto command = [](uint8_t value) { tft.writecommand(value); };
   auto data = [](uint8_t value) { tft.writedata(value); };
@@ -72,6 +83,7 @@ static void initM5GoV26Panel() {
   command(0x29); // Display on
   tft.invertDisplay(true); // Official M5Stack ILI9342C path enables INVON
 }
+#endif
 
 // ---------- custom sprite storage (LittleFS) ----------
 // Custom uploads replace the compiled-in default animation without needing a
@@ -172,7 +184,11 @@ bool netChromeDrawn = false;
 bool netHeaderDirty = false;
 
 // Chart layout (task-manager style scrolling area chart, newest at the right)
+#if defined(T_EMBED_CC1101)
+const int NET_CHART_X = 8, NET_CHART_Y = 82, NET_CHART_W = 154, NET_CHART_H = 180;
+#else
 const int NET_CHART_X = 8, NET_CHART_Y = 60, NET_CHART_W = 224, NET_CHART_H = 128;
+#endif
 long netHistRx[NET_CHART_W], netHistTx[NET_CHART_W]; // one 250ms sample per column
 long netScale = 10240;    // current "nice" full-scale value (whole chart shares it)
 String netLastDl, netLastUl, netLastScaleText; // change detection for partial redraws
@@ -182,9 +198,18 @@ const int MUSIC_COVER_W = 128;
 const int MUSIC_COVER_H = 128;
 // Title/artist come as a Mac-rendered bitmap strip (232x44) because the
 // panel fonts are ASCII-only and CJK titles would render as blanks.
+// The T-Embed is narrower than the Mac's 232px text-strip endpoint.
+#if defined(T_EMBED_CC1101)
+const int MUSIC_TEXT_W = 162;
+#else
 const int MUSIC_TEXT_W = 232;
+#endif
 const int MUSIC_TEXT_H = 44;
+#if defined(T_EMBED_CC1101)
+const int MUSIC_TEXT_X = 4, MUSIC_TEXT_Y = 154;
+#else
 const int MUSIC_TEXT_X = 4, MUSIC_TEXT_Y = 150;
+#endif
 const unsigned long MUSIC_POLL_INTERVAL_MS = 2000;
 String musicTitle, musicArtist, musicAlbum;
 bool musicPlaying = false;
@@ -255,6 +280,7 @@ volatile bool previewSoundRequested = false;
 // M5GO's built-in speaker, so this needs no SD card or LittleFS upload.
 constexpr uint32_t COMPLETION_SAMPLE_RATE = 11025;
 
+#if defined(HAS_DAC_SPEAKER)
 void restoreSpeakerToneOutput() {
   dacWrite(SPEAKER_PIN, 0);
   ledcAttachPin(SPEAKER_PIN, SPEAKER_CHANNEL);
@@ -313,6 +339,130 @@ void updateBeep() {
     beepUntilMs = 0;
   }
 }
+#elif defined(XIAOZHI_S3_LCD154)
+// The Zhengchen board's amplifier receives 32-bit, left-slot I2S audio.
+// Generate a short tone for completion/preview rather than trying to drive
+// the speaker connector from the ESP32's unavailable DAC.
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+i2s_chan_handle_t speakerI2sChannel = nullptr;
+#else
+i2s_port_t speakerI2sPort = I2S_NUM_0;
+#endif
+bool speakerI2sReady = false;
+
+void initI2sSpeaker() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  // This is the same ESP-IDF standard-mode configuration used by the
+  // original Zhengchen firmware, including the left-slot 32-bit framing.
+  i2s_chan_config_t channelConfig = {};
+  channelConfig.id = I2S_NUM_0;
+  channelConfig.role = I2S_ROLE_MASTER;
+  channelConfig.dma_desc_num = 6;
+  channelConfig.dma_frame_num = 240;
+  channelConfig.auto_clear_after_cb = true;
+  if (i2s_new_channel(&channelConfig, &speakerI2sChannel, nullptr) != ESP_OK) {
+    speakerI2sChannel = nullptr;
+    Serial.println("[audio] unable to create I2S speaker channel");
+    return;
+  }
+
+  i2s_std_config_t config = {};
+  config.clk_cfg.sample_rate_hz = 24000;
+  config.clk_cfg.clk_src = I2S_CLK_SRC_DEFAULT;
+  config.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+  config.slot_cfg.data_bit_width = I2S_DATA_BIT_WIDTH_32BIT;
+  config.slot_cfg.slot_bit_width = I2S_SLOT_BIT_WIDTH_AUTO;
+  config.slot_cfg.slot_mode = I2S_SLOT_MODE_MONO;
+  config.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+  config.slot_cfg.ws_width = I2S_DATA_BIT_WIDTH_32BIT;
+  config.slot_cfg.ws_pol = false;
+  config.slot_cfg.bit_shift = true;
+#ifdef I2S_HW_VERSION_2
+  config.slot_cfg.left_align = true;
+  config.slot_cfg.big_endian = false;
+  config.slot_cfg.bit_order_lsb = false;
+#endif
+  config.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+  config.gpio_cfg.bclk = (gpio_num_t)SPEAKER_I2S_BCLK;
+  config.gpio_cfg.ws = (gpio_num_t)SPEAKER_I2S_LRCK;
+  config.gpio_cfg.dout = (gpio_num_t)SPEAKER_I2S_DOUT;
+  config.gpio_cfg.din = I2S_GPIO_UNUSED;
+  if (i2s_channel_init_std_mode(speakerI2sChannel, &config) != ESP_OK ||
+      i2s_channel_enable(speakerI2sChannel) != ESP_OK) {
+    Serial.println("[audio] unable to initialize I2S speaker");
+    speakerI2sChannel = nullptr;
+    return;
+  }
+#else
+  i2s_config_t config = {};
+  config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+  config.sample_rate = 24000;
+  config.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
+  config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+  config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+  config.dma_buf_count = 6;
+  config.dma_buf_len = 240;
+  config.tx_desc_auto_clear = true;
+  if (i2s_driver_install(speakerI2sPort, &config, 0, nullptr) != ESP_OK) {
+    Serial.println("[audio] unable to create I2S speaker channel");
+    return;
+  }
+
+  i2s_pin_config_t pins = {};
+  pins.bck_io_num = SPEAKER_I2S_BCLK;
+  pins.ws_io_num = SPEAKER_I2S_LRCK;
+  pins.data_out_num = SPEAKER_I2S_DOUT;
+  pins.data_in_num = I2S_PIN_NO_CHANGE;
+  pins.mck_io_num = I2S_PIN_NO_CHANGE;
+  if (i2s_set_pin(speakerI2sPort, &pins) != ESP_OK) {
+    Serial.println("[audio] unable to initialize I2S speaker");
+    i2s_driver_uninstall(speakerI2sPort);
+    return;
+  }
+#endif
+  speakerI2sReady = true;
+  Serial.println("[audio] I2S standard speaker ready");
+}
+
+void triggerCompletionBeep() {
+  if (!speakerI2sReady || completionVolume == 0) return;
+
+  constexpr uint32_t kSampleRate = 24000;
+  constexpr uint32_t kToneHz = 880;
+  constexpr size_t kSamples = kSampleRate / 7; // about 140 ms
+  constexpr size_t kChunkSamples = 240;
+  int32_t samples[kChunkSamples];
+  // The board's I2S amplifier expects a full-scale 32-bit stream.  The
+  // previous conservative gain made the small onboard speaker barely audible.
+  const float amplitude = 0x70000000L * completionVolume / 100.0f;
+  for (size_t offset = 0; offset < kSamples; offset += kChunkSamples) {
+    size_t count = min(kChunkSamples, kSamples - offset);
+    for (size_t i = 0; i < count; ++i) {
+      float phase = 2.0f * PI * kToneHz * (offset + i) / kSampleRate;
+      samples[i] = (int32_t)(sinf(phase) * amplitude);
+    }
+    size_t bytesWritten = 0;
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    esp_err_t result = i2s_channel_write(speakerI2sChannel, samples,
+                                         count * sizeof(int32_t), &bytesWritten,
+                                         portMAX_DELAY);
+#else
+    esp_err_t result = i2s_write(speakerI2sPort, samples, count * sizeof(int32_t),
+                                 &bytesWritten, portMAX_DELAY);
+#endif
+    if (result != ESP_OK) {
+      Serial.println("[audio] I2S speaker write failed");
+      return;
+    }
+  }
+}
+
+void updateBeep() {}
+#else
+void initI2sSpeaker() {}
+void triggerCompletionBeep() {}
+void updateBeep() {}
+#endif
 
 // Quota values from the bridge are always "used" percentages. This preference
 // only changes how they are rendered, not the exhausted-window countdown.
@@ -373,7 +523,11 @@ void saveDisplayMode() {
 }
 
 void applyBrightness() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(TFT_BL, map(brightness, 0, 100, 0, 255));
+#else
   ledcWrite(0, map(brightness, 0, 100, 0, 255));
+#endif
 }
 
 void loadBrightness() {
@@ -657,8 +811,13 @@ String pctText(float pct) {
 // weekly-only Codex plan uses one centered "Weekly 42%" line, matching the
 // desktop mirror. Values repaint only when their text changes (force = after
 // a full-screen clear), so status polling never flashes them.
+#if defined(T_EMBED_CC1101)
+const int QUOTA_LABEL_Y = 253, QUOTA_VALUE_Y = 272;
+const int QUOTA_COL1_X = 48, QUOTA_COL2_X = 122;
+#else
 const int QUOTA_LABEL_Y = 183, QUOTA_VALUE_Y = 199;
 const int QUOTA_COL1_X = 70, QUOTA_COL2_X = 170;
+#endif
 const int QUOTA_CLEAR_X = RING_MARGIN + RING_THICKNESS;
 const int QUOTA_CLEAR_W = SCREEN_W - 2 * QUOTA_CLEAR_X;
 String lastQuota5h, lastQuotaWk;
@@ -705,7 +864,11 @@ void drawQuotaText(float hourPct, float weekPct, bool hasHourQuota, bool force) 
       // There is no 5h value to pair with it, so give the weekly value the
       // full width instead of retaining the old two-line mobile layout.
       tft.fillRect(QUOTA_CLEAR_X, QUOTA_VALUE_Y, QUOTA_CLEAR_W, 26, TFT_BLACK);
+#if defined(T_EMBED_CC1101)
+      drawBoldString("Wk " + v2, SCREEN_CX, QUOTA_VALUE_Y + 2, 2, TFT_WHITE);
+#else
       drawBoldString("Weekly " + v2, SCREEN_CX, QUOTA_VALUE_Y, 4, TFT_WHITE);
+#endif
     }
   }
 }
@@ -786,13 +949,23 @@ void drawCountdown(bool force) {
   lastCountdown = t;
   tft.setTextDatum(TC_DATUM);
   if (force) {
+#if defined(T_EMBED_CC1101)
+    tft.fillRect(RING_MARGIN + RING_THICKNESS, 118,
+                 SCREEN_W - 2 * (RING_MARGIN + RING_THICKNESS), 86, TFT_BLACK);
+    drawBoldString(showingCd == CD_WEEK ? "Wk RESET IN" : "5h RESET IN", SCREEN_CX, 126, 2, TFT_LIGHTGREY);
+#else
     tft.fillRect(SCREEN_CX - 99, 66, 198, 84, TFT_BLACK);
     drawBoldString(showingCd == CD_WEEK ? "Wk RESET IN" : "5h RESET IN", SCREEN_CX, 72, 2, TFT_LIGHTGREY);
+#endif
   }
   // Background-color draw overwrites glyphs in place (no clear-then-draw
   // flash between seconds).
   tft.setTextColor(TFT_ORANGE, TFT_BLACK);
+#if defined(T_EMBED_CC1101)
+  tft.drawString(t, SCREEN_CX, 154, 4);
+#else
   tft.drawString(t, SCREEN_CX, 102, 6);
+#endif
 }
 
 // App logo in the top-left corner (inside the quota ring) so a glance tells
@@ -960,9 +1133,15 @@ void drawNetChrome() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(0x7BEF, TFT_BLACK);
   tft.drawString("DOWN", 14, 10, 1);
+#if defined(T_EMBED_CC1101)
+  tft.drawString("UP", 14, 46, 1);
+  tft.setTextDatum(TC_DATUM);
+  tft.drawString("MAC NET", SCREEN_CX, 284, 1);
+#else
   tft.drawString("UP", 134, 10, 1);
   tft.setTextDatum(TC_DATUM);
   tft.drawString("MAC NET  -  56s", SCREEN_CX, 208, 1);
+#endif
 }
 
 // Header readouts (1s-averaged), each repainted only when its text changes.
@@ -972,15 +1151,27 @@ void drawNetHeaderIfChanged() {
   tft.setTextDatum(TL_DATUM);
   if (dl != netLastDl) {
     netLastDl = dl;
+#if defined(T_EMBED_CC1101)
+    tft.fillRect(12, 20, 146, 24, TFT_BLACK);
+#else
     tft.fillRect(12, 20, 116, 28, TFT_BLACK);
+#endif
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.drawString(dl, 12, 20, 4);
   }
   if (ul != netLastUl) {
     netLastUl = ul;
+#if defined(T_EMBED_CC1101)
+    tft.fillRect(12, 56, 146, 24, TFT_BLACK);
+#else
     tft.fillRect(132, 20, 108, 28, TFT_BLACK);
+#endif
     tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+#if defined(T_EMBED_CC1101)
+    tft.drawString(ul, 12, 56, 4);
+#else
     tft.drawString(ul, 132, 20, 4);
+#endif
   }
 }
 
@@ -1047,10 +1238,18 @@ void drawNetChart() {
   String scaleText = speedText(netScale);
   if (scaleText != netLastScaleText) {
     netLastScaleText = scaleText;
+#if defined(T_EMBED_CC1101)
+    tft.fillRect(56, 266, 106, 10, TFT_BLACK);
+#else
     tft.fillRect(120, 48, 112, 10, TFT_BLACK);
+#endif
     tft.setTextDatum(TR_DATUM);
     tft.setTextColor(0x7BEF, TFT_BLACK);
+#if defined(T_EMBED_CC1101)
+    tft.drawString(scaleText, NET_CHART_X + NET_CHART_W, 266, 1);
+#else
     tft.drawString(scaleText, NET_CHART_X + NET_CHART_W, 48, 1);
+#endif
     tft.setTextDatum(TL_DATUM);
   }
 }
@@ -1177,6 +1376,11 @@ bool drawMusicCoverFromBridge() {
 // Streams the Mac-rendered 232x44 title/artist strip and blits it row by
 // row — the only way to get CJK on screen without shipping a font.
 bool drawMusicTextFromBridge() {
+#if defined(T_EMBED_CC1101)
+  // Bridge text strips are currently 232px wide. Use the local text renderer
+  // on the 170px T-Embed instead of overflowing its line buffer.
+  return false;
+#else
   if (WiFi.status() != WL_CONNECTED || bridgeHost.length() == 0) return false;
   WiFiClient client;
   HTTPClient http;
@@ -1202,6 +1406,7 @@ bool drawMusicTextFromBridge() {
   }
   http.end();
   return ok;
+#endif
 }
 
 // ASCII-only fallback if the strip fetch fails (CJK will stay blank, but at
@@ -1211,7 +1416,7 @@ void drawMusicTextFallback() {
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   String title = musicTitle.length() ? musicTitle : "No Music";
-  tft.drawString(fitText(title, 216, 2), SCREEN_CX, MUSIC_TEXT_Y + 4, 2);
+  tft.drawString(fitText(title, MUSIC_TEXT_W - 4, 2), SCREEN_CX, MUSIC_TEXT_Y + 4, 2);
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
   tft.drawString(fitText(musicArtist, 216, 2), SCREEN_CX, MUSIC_TEXT_Y + 24, 2);
 }
@@ -1233,7 +1438,11 @@ void drawMusicScreen(bool coverChanged, bool textChanged) {
     if (!drawMusicTextFromBridge()) drawMusicTextFallback();
   }
 
+#if defined(T_EMBED_CC1101)
+  const int bx = 12, by = 228, bw = 146, bh = 8;
+#else
   const int bx = 20, by = 204, bw = 200, bh = 8;
+#endif
   tft.fillRect(0, by - 2, SCREEN_W, SCREEN_H - by + 2, TFT_BLACK);
   tft.fillRect(bx, by, bw, bh, TFT_DARKGREY);
   float progress = musicDuration > 0 ? (float)musicElapsed / (float)musicDuration : 0;
@@ -1243,7 +1452,7 @@ void drawMusicScreen(bool coverChanged, bool textChanged) {
   tft.fillRect(bx, by, (int)(bw * progress), bh, color);
   tft.setTextDatum(TC_DATUM);
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(timeText(musicElapsed) + " / " + timeText(musicDuration), SCREEN_CX, 220, 1);
+  tft.drawString(timeText(musicElapsed) + " / " + timeText(musicDuration), SCREEN_CX, by + 16, 1);
 }
 
 void pollMusic() {
@@ -1499,20 +1708,24 @@ void handleSerialFrame(char *line) {
 }
 
 void pumpSerial() {
-  while (Serial.available()) {
-    char ch = (char)Serial.read();
-    if (ch == '\n' || ch == '\r') {
-      if (serialLineLen > 0 && serialLine[0] == '#') {
-        serialLine[serialLineLen] = 0;
-        handleSerialFrame(serialLine);
-      }
-      serialLineLen = 0;
-    } else if (serialLineLen < sizeof(serialLine) - 1) {
-      serialLine[serialLineLen++] = ch;
-    } else {
-      serialLineLen = 0;
+  // A host can stream serial data continuously (or a USB-UART bridge can
+  // report buffered input for several scheduler ticks).  Do not let that
+  // starve the ESP32-S3 idle task and trip the task watchdog.
+  if (!Serial.available()) return;
+
+  char ch = (char)Serial.read();
+  if (ch == '\n' || ch == '\r') {
+    if (serialLineLen > 0 && serialLine[0] == '#') {
+      serialLine[serialLineLen] = 0;
+      handleSerialFrame(serialLine);
     }
+    serialLineLen = 0;
+  } else if (serialLineLen < sizeof(serialLine) - 1) {
+    serialLine[serialLineLen++] = ch;
+  } else {
+    serialLineLen = 0;
   }
+  delay(1);
 }
 
 // ---------- web admin ----------
@@ -2132,17 +2345,39 @@ void setup() {
   loadCustomSpriteState();
 
   tft.init();
+#if defined(M5STACK)
   initM5GoV26Panel();
+#endif
   // M5Stack's official Core1 display wrapper uses rotation 1 after selecting
   // the ILI9342C init path, yielding the expected 320x240 landscape canvas.
+#if defined(T_EMBED_CC1101)
+  tft.setRotation(0);
+#elif defined(XIAOZHI_S3_LCD154)
+  // The Zhengchen 1.54-inch panel is physically mounted 180 degrees from
+  // the M5Stack landscape reference orientation used by this UI.
+  tft.setRotation(3);
+#else
   tft.setRotation(1);
+#endif
   tft.fillScreen(TFT_BLACK);
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttach(TFT_BL, BRIGHTNESS_PWM_FREQ, 8);
+#else
   ledcSetup(0, BRIGHTNESS_PWM_FREQ, 8);
   ledcAttachPin(TFT_BL, 0);
+#endif
   applyBrightness();
+#if defined(XIAOZHI_S3_LCD154)
+  // The original board firmware keeps this power-control pin high.
+  pinMode(2, OUTPUT);
+  digitalWrite(2, HIGH);
+  initI2sSpeaker();
+#endif
+#if defined(HAS_DAC_SPEAKER)
   ledcSetup(SPEAKER_CHANNEL, 2000, 8);
   ledcAttachPin(SPEAKER_PIN, SPEAKER_CHANNEL);
   ledcWriteTone(SPEAKER_CHANNEL, 0);
+#endif
 
   setupWiFi();
   if (WiFi.status() == WL_CONNECTED) {
