@@ -4,7 +4,7 @@
 
 <h1 align="center">AI Mac Mini Display</h1>
 
-<p align="center">A tiny AI status computer for your desk — ESP8266 · Open Source Hardware · Desktop Companion</p>
+<p align="center">A tiny AI status computer for your desk — M5Stack Core ESP32 · Open Source Hardware · Desktop Companion</p>
 
 <p align="center">
   <a href="README.md">中文</a> ·
@@ -21,7 +21,7 @@
   <img src="docs/images/hero.jpg" width="640" alt="AI Mac Mini Display">
 </p>
 
-A retro mini-TV with a 240×240 screen that sits on your desk showing **what Claude Code / Codex CLI are doing right now and how much quota you have left**. No API key needed: everything comes from the CLI credentials and session logs already on your machine, served to the device over your LAN by the companion Mac / Windows bridge app.
+A retro mini-TV with a 320×240 screen that sits on your desk showing **what Claude Code / Codex CLI are doing right now and how much quota you have left**. No API key needed: everything comes from the CLI credentials and session logs already on your machine, served to the device over your LAN by the companion Mac / Windows bridge app.
 
 ## Features
 
@@ -34,15 +34,18 @@ A retro mini-TV with a 240×240 screen that sits on your desk showing **what Cla
 
 ## Getting started
 
-What you need: an "SD2 mini-TV" dev board ([open-source hardware](https://oshwhub.com/q21182889/sd2), or [buy one assembled](https://mobile.yangkeduo.com/goods.html?ps=OuBjGMWE82)) and a USB **data** cable.
+What you need: an **M5Stack Core Basic / Gray (M5GO v2.6, ESP32, 16 MB flash)** and a USB **data** cable. This firmware does not support Core2, M5Stick, or the older ESP8266 SD2 mini-TV.
 
-### Step 1 · Flash the firmware (~30 s)
+### Step 1 · Flash the firmware
 
-Open **[mac.qust.me/#flash](https://mac.qust.me/#flash)** in Chrome / Edge, plug the device in over USB, click "Connect & Flash", pick the serial port and wait. No tools to install.
+Install PlatformIO, then build and flash from the repository root:
 
-> Serial port not showing up? On Windows install the [CH340 driver](https://www.wch.cn/downloads/CH341SER_EXE.html); macOS has it built in. Try another USB cable (many are charge-only). More troubleshooting in the [website FAQ](https://mac.qust.me/#flash-faq).
->
-> Command-line folks can also flash `esp8266-ai-firmware-*.bin` from [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) to address `0x0` with esptool.
+```sh
+cd firmware
+pio run -e m5stack-core-esp32 -t upload --upload-port /dev/cu.usbserial-…
+```
+
+Without `--upload-port`, PlatformIO tries to detect the serial port automatically. The partition, LittleFS and M5GO display settings are already in `firmware/platformio.ini`; see [firmware/README-M5STACK.md](firmware/README-M5STACK.md) for details.
 
 ### Step 2 · Connect WiFi
 
@@ -65,7 +68,7 @@ Daily use is all on the tray icon: **left-click** opens a live mirror of the dev
 
 ### Optional USB wired connection
 
-If the Wi-Fi network isolates clients, or you do not want to configure Wi-Fi yet, keep the macOS bridge running and connect the clock by USB data cable. The bridge automatically discovers the CH340 serial port and pushes status and network data to the device. Quit the bridge before flashing firmware so two programs do not compete for the serial port.
+If the Wi-Fi network isolates clients, or you do not want to configure Wi-Fi yet, keep the macOS bridge running and connect the clock by USB data cable. When it detects a compatible serial port, the bridge pushes status and network data to the device. Quit the bridge before flashing firmware so two programs do not compete for the serial port.
 
 ## FAQ
 
@@ -77,16 +80,19 @@ If the Wi-Fi network isolates clients, or you do not want to configure Wi-Fi yet
 
 The bridge scans `~/.codex/sessions` as a compatibility fallback, but a final transcript write does not mean that Codex is still running. Configure Codex hooks to post lifecycle events directly: the bridge treats those events as authoritative, while retaining log scanning for sessions without hooks.
 
-Save this as `~/.ai-clock/codex-status-hook.sh`, then run `chmod +x ~/.ai-clock/codex-status-hook.sh`:
+The version-controlled script is [`scripts/codex-status-hook.sh`](scripts/codex-status-hook.sh). From the root of a cloned repository, install it to a stable location outside the repository:
 
 ```sh
-#!/bin/sh
-event="$1"
-cat >/dev/null
-curl -fsS --connect-timeout 0.5 --max-time 1 \
-  -H 'Content-Type: application/json' \
-  -d "{\"agent\":\"codex\",\"event\":\"$event\"}" \
-  http://127.0.0.1:8765/event >/dev/null 2>&1 || true
+mkdir -p ~/.ai-clock
+install -m 755 scripts/codex-status-hook.sh ~/.ai-clock/codex-status-hook.sh
+```
+
+If your system does not have `install`, use:
+
+```sh
+mkdir -p ~/.ai-clock
+cp scripts/codex-status-hook.sh ~/.ai-clock/codex-status-hook.sh
+chmod 755 ~/.ai-clock/codex-status-hook.sh
 ```
 
 In `~/.codex/hooks.json`, add one command hook for each of `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`. Their commands are:
@@ -105,6 +111,8 @@ For example, retain existing hooks and add this `Stop` entry:
 
 Approve the hook in Codex if prompted. `PermissionRequest` stops the working animation and raises the red attention alert; `Stop` ends the animation immediately instead of being overwritten by Codex's final JSONL write.
 
+Ensure `[features]` in `~/.codex/config.toml` includes `hooks = true`; if Codex asks you to trust the new hook, run `/hooks` in the TUI and approve it. After updating the repository, rerun the install command above to update the installed script.
+
 ## Development
 
 ```
@@ -112,6 +120,7 @@ firmware/     M5Stack Core ESP32 firmware (PlatformIO + Arduino, with on-board G
 mac-app/      macOS menu bar bridge (Swift/SPM, zero third-party dependencies)
 windows-app/  Windows tray bridge (C# / .NET 8 WinForms)
 tools/        GIF → RGB565 built-in sprite conversion script
+scripts/      Version-controlled user helper scripts (including the Codex status hook)
 docs/         Developer docs (pinout, HTTP API, architecture details)
 ```
 
