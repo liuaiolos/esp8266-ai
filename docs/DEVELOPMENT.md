@@ -2,13 +2,13 @@
 
 > 面向想改代码 / 自己折腾硬件的人，普通使用看仓库根目录的 [README](../README.md) 即可。
 
-一个 ESP8266 WiFi 时钟固件：显示时间 + Claude Code / Codex CLI 的实时工作状态和用量。
+一个面向小智兼容郑晨 1.54 寸 Wi‑Fi 板的 ESP32‑S3 固件：显示 Claude Code / Codex CLI 的实时工作状态和用量。
 不需要任何官方账单 API key —— 数据来自两处本地已有的来源：
 
 - **工作状态**（working/idle/offline）：本地会话日志的新旧程度
   - `~/.claude/projects/**/*.jsonl`（Claude Code 会话记录）
   - `~/.codex/sessions/**/*.jsonl`（Codex CLI 会话记录）
-- **真实额度**（5h / 周窗口用量百分比 + 重置时间）：复用两个 CLI 已经存在本机的
+- **真实额度**（短窗口 / 周窗口用量百分比 + 重置时间）：复用两个 CLI 已经存在本机的
   OAuth 登录凭据，直接调各自官方用量接口（做法与
   [CodexBar](https://github.com/steipete/CodexBar) 相同，token 只发给各自官方 API）：
   - Claude：Keychain 里的 `Claude Code-credentials` → `api.anthropic.com/api/oauth/usage`
@@ -16,8 +16,8 @@
 
 架构：`mac-app/` 是一个 **Swift 原生菜单栏 app**（Windows 用户用 `windows-app/`，
 功能一致的 C# 托盘移植版），读日志、开一个本地 HTTP 服务；
-`firmware/` 是 ESP8266 固件，联网后每 15 秒轮询这个服务，把时间 + 状态画到 240x240
-ST7789 彩屏上。桌宠动画（GIF）的上传和解码**全部在 ESP8266 板子上完成**，换形象不再需要
+`firmware/` 是 ESP32‑S3 固件，联网后每 5 秒轮询这个服务，把状态画到 240×240
+ST7789 彩屏上。桌宠动画（GIF）的上传和解码**全部在设备板子上完成**，换形象不再需要
 电脑参与（详见第 4 节）。
 
 ## 目录结构
@@ -25,8 +25,9 @@ ST7789 彩屏上。桌宠动画（GIF）的上传和解码**全部在 ESP8266 �
 ```
 mac-app/      Mac 原生菜单栏 app (Swift / SPM，仅用系统框架，无第三方依赖)
 windows-app/  Windows 托盘 app (C# / .NET 8 WinForms)，功能与 mac-app 一致（见其 README）
-firmware/     ESP8266 固件 (PlatformIO + Arduino framework)，含板上 GIF 解码
+firmware/     小智兼容郑晨 1.54 寸 Wi‑Fi 板 ESP32-S3 固件 (PlatformIO + Arduino framework)，含板上 GIF 解码
 tools/        GIF -> RGB565 默认精灵图头文件的转换脚本（改编译进固件的默认动画时用）
+scripts/      版本控制的用户辅助脚本；Codex hook 从这里安装到 ~/.ai-clock/
 ```
 
 ## 1. 跑起 Mac 端菜单栏 app
@@ -44,19 +45,20 @@ swift run                # 前台运行；或 swift build 后跑 .build/debug/AI
 菜单栏会出现一个**复古麦金塔小电脑图标**（代码画的模板图，自动适配深浅色菜单栏，
 不占宽度显示额度数字）：
 
-- **左键点击** → 弹出 ESP8266 屏幕的**实时镜像**：Mac 端用与固件完全相同的数据
+- **左键点击** → 弹出设备屏幕的**实时镜像**：Mac 端用与固件完全相同的数据
   重绘同一个画面（方形额度环 + 当前桌宠动画 + logo + 额度文字），动画帧直接从设备
   `GET /sprite/<app>/raw` 拉取（设备正在用什么就播什么，自定义/内置都一样），
   working 时同步播放走路循环，随设备 2s/6s 切换同步换角色；底部附
-  自动/Claude/Codex 快速切换。
-- **右键点击** → 控制菜单：完整额度（5h/周 用量 + 重置倒计时）+ 设备遥控：
+  自动/Claude/Codex/网速/音乐快速切换、亮度与完成提示音音量滑条。
+- **右键点击** → 控制菜单：完整额度（可用窗口的用量 + 重置倒计时）+ 设备遥控：
 
 - **自动查找并配对设备**：一般不用手动——设备本来就在轮询本机的 `/status`，
   bridge 记下来访 IP 即完成发现（零扫描）；地址为空时自动配对，设备 DHCP 换了 IP
   也会自愈。菜单项走完整流程：最近来访 IP → 已配置地址复验 → 子网 /24 扫描兜底
   （覆盖"刚配完 WiFi、还没设过桥接"的全新设备）。
 - **设置设备地址…**：手动填时钟的 IP（开机时屏幕会显示；有自动配对后基本用不上）
-- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex
+- **屏幕显示**：自动（谁在干活显示谁）/ 固定 Claude / 固定 Codex / 网速曲线 / 音乐播放
+- **额度显示**：切换显示已用或剩余额度
 - **音乐播放**：显示 Mac 当前播放的专辑封面、歌曲、歌手和进度
 - **更换桌宠动画…**：内置 [petdex.dev](https://petdex.dev) 画廊（3300+ 开源桌宠），
   搜索 → 选动画（待机/跑步/挥手…9 种）→ 预览 → 一键上传到设备
@@ -87,47 +89,28 @@ LaunchAgent（`~/Library/LaunchAgents/`）即可，未内置，按需再加。
 
 ### 数据来源与局限
 
-- **额度（两家都是真实值）**：app 每 2 分钟调一次官方用量接口（见开头），拿到
-  5h / 周窗口的已用百分比和重置时间，合并进 `/status` 下发给设备。接口 429 限流时
-  自动退避 5 分钟并沿用上一次的数值。
+- **额度（两家都是真实值）**：app 每 2 分钟调一次官方用量接口（见开头），拿到可用短窗口
+  / 周窗口的已用百分比和重置时间，合并进 `/status` 下发给设备。部分 Codex 账号只返回周
+  限额，bridge 会识别这一情况并只显示周窗口。接口 429 限流时自动退避 5 分钟并沿用上一次的数值。
 - Claude 的 OAuth token 存在 Keychain，app 通过 `security` CLI 读取，第一次运行
   macOS 可能弹一次授权框（选"始终允许"即可）；`~/.claude/.credentials.json` 存在时
   优先读文件。
 - 若凭据缺失/过期，额度显示"?"，工作状态仍照常工作（来自日志，不依赖网络）。
 
-## 2. 烧录 ESP8266 固件
+## 2. 烧录小智兼容 ESP32-S3 固件
 
-已确认的硬件：ESP8266EX（ESP-12S 模组）/ 4MB flash / CH340C 转串口，设备节点
-`/dev/cu.usbserial-130`。这是拼多多"WiFi天气时钟 MG01"成品板，本质是 oshwhub 上
-["SD2/小电视"开源方案](https://oshwhub.com/q21182889/sd2) 的量产版。
+已确认硬件为**小智兼容郑晨 1.54 寸 Wi‑Fi 板**：ESP32‑S3、16MB Flash、8MB OPI PSRAM、
+240×240 ST7789 SPI 屏和板载 I2S 扬声器。它不适用于 ESP8266 SD2 小电视、M5Stack Core、
+Core2、M5Stick 或其他接线不同的开发板。
 
-**接线是厂家固定的，一体成型无法重接**，网上能搜到的几份"看起来像"的教程接线图实测
-都是错的——真正正确的引脚来自该开源项目附带的厂家参考固件源码
-（`TFT_eSPI/User_Setup.h` + `SmallDesktopDisplay.ino`），已在实机验证点亮：
-
-| 屏幕引脚 | 说明 | ESP-12S | GPIO |
-|---|---|---|---|
-| SCLK | SPI 时钟 | D5 | GPIO14（硬件 SPI）|
-| MOSI | SPI 数据 | D7 | GPIO13（硬件 SPI）|
-| CS   | 片选 | D8 | GPIO15 |
-| DC   | 数据/命令选择 | D3 | GPIO0  |
-| RESET| 复位 | D4 | GPIO2  |
-| 背光 | LED 背光，**低电平点亮**，厂家固件用 PWM 调光 | D1 | GPIO5  |
-| VCC  | 电源 | 3V3 | - |
-| GND  | 地 | GND | - |
-
-驱动型号也有讲究：要用 TFT_eSPI 的 `ST7789_2_DRIVER`（一个专门的简化初始化变体），
-用普通的 `ST7789_DRIVER` 配合正确引脚依然点不亮。`platformio.ini` 里已经按这个组合
-配置好了。
-
-如果你买到的是完全不同的板子，改 `firmware/platformio.ini` 里 `build_flags` 的
-`TFT_*` 几行即可；但如果就是这款"WiFi天气时钟 MG01"，直接用现在的配置就行，不用再猜。
+屏幕使用板载连接，无需额外接线。`firmware/platformio.ini` 固定了 16MB 分区表、OPI PSRAM
+内存类型和 ST7789 引脚；除非移植到不同硬件，不要修改这些设置。SPI 引脚为 MOSI=41、
+SCLK=42、RST=45、DC=40、CS=21、背光=20（高电平点亮）。
 
 ```bash
 cd firmware
-python3 -m venv .pio-venv && source .pio-venv/bin/activate
-pip install platformio
-pio run -t upload          # 已验证：编译成功，Flash 45.7%，RAM 39.7%
+pio run -e xiaozhi-s3-lcd154
+pio run -e xiaozhi-s3-lcd154 -t upload --upload-port /dev/cu.usbmodem…
 ```
 
 烧录后串口会打印调试日志（这版固件不再是"静默"的）：
@@ -140,10 +123,9 @@ pio run -t upload          # 已验证：编译成功，Flash 45.7%，RAM 39.7%
 *wm:AP IP address: 192.168.4.1
 ```
 
-首次开机（或 WiFi 配置丢失时）会开一个热点 `AI-Clock-Setup`，手机连上后自动弹出配置页
-（或手动访问 `192.168.4.1`），选择你的 WiFi，并在 "Bridge host (ip:port)" 里填这台 Mac
-的局域网 IP，例如 `192.168.1.23:8765`。保存后设备会记住配置（存在 LittleFS 里），下次
-开机自动连线。
+首次开机（或 WiFi 配置丢失时）会开一个热点 `AI-Clock-Setup`。连接后在配置页选择 WiFi，
+并在 "Bridge host (ip:port)" 里填运行 bridge 的电脑局域网地址，例如 `192.168.1.23:8765`。
+保存后配置会存入 LittleFS，下次开机自动连接。
 
 查看串口日志：
 
@@ -164,8 +146,8 @@ pio device monitor -b 115200
 
 - 屏幕中央：对应角色的大幅像素动画（Claude = 跑步的 Dario，Codex = 戴耳机的宠物），
   仅在该角色 `working` 时播放动画，否则停在静止帧。
-- 屏幕四周一圈方形进度环：环的填充长度 = 用量百分比（Claude 用 5 小时滚动窗口已用
-  比例近似，Codex 用真实的 5h `primary_pct`）；环的颜色/动画参考
+- 屏幕四周一圈方形进度环：环的填充长度 = 用量百分比（Claude 用短窗口已用比例近似；
+  Codex 用 API 返回的 `primary_pct`，只有周限额时自动显示周窗口）；环的颜色/动画参考
   [vibecoding-signal-light](https://github.com/starlight36/vibecoding-signal-light)
   的红绿灯设计：
   - **常亮绿** = 空闲/离线，不需要关注
@@ -199,6 +181,10 @@ pio device monitor -b 115200
 | GET | `/api/info` | 设备状态 JSON：ip/ssid/bridge/显示模式/当前显示/自定义精灵标记 |
 | POST | `/api/display` | `mode=auto\|claude\|codex\|net\|music` 切换屏幕显示（net=网速曲线页，music=音乐播放页）|
 | POST | `/api/bridge` | `host=ip:port` 设置桥接地址 |
+| POST | `/api/brightness` | `level=0..100` 设置并持久化背光亮度 |
+| POST | `/api/volume` | `level=0..100` 设置并持久化完成提示音音量 |
+| POST | `/api/preview-sound` | 播放一次完成提示音试听 |
+| POST | `/api/quota-display` | `mode=used\|remaining` 切换额度文字显示方式 |
 | POST | `/sprite/claude`、`/sprite/codex` | multipart 上传 GIF 并板上解码替换 |
 | POST | `/sprite/claude/reset`、`/sprite/codex/reset` | 删除自定义动画，恢复内置形象 |
 | GET | `/sprite/claude/raw`、`/sprite/codex/raw` | 当前生效动画的原始帧流 `[1B帧数][RGB565大端帧...]`（镜像窗口用）|
@@ -248,7 +234,7 @@ Mac 端常驻进程由 LaunchAgent（`~/Library/LaunchAgents/local.AIClockBridge
 
 ## 7. Hooks 实时状态（秒级，参考 clawd-on-desk 的做法）
 
-除了日志 mtime 轮询（保留为兜底），bridge 还接收两个 CLI 官方 hooks 的事件推送，
+除了日志 mtime 轮询（保留为兜底），bridge 还接收 CLI hooks 的事件推送，
 状态切换从"最多迟滞 20 秒"变成"毫秒级"：
 
 - bridge 新增 `POST /event`，body：`{"agent":"claude|codex","event":"PreToolUse"}`
@@ -257,27 +243,31 @@ Mac 端常驻进程由 LaunchAgent（`~/Library/LaunchAgents/local.AIClockBridge
   不会拖慢 Claude Code；与已有 hooks 共存，靠命令里的 `8765/event` 标记幂等）
 - 映射：UserPromptSubmit/Pre/PostToolUse 等 → working（TTL 10 分钟，覆盖长工具调用）；
   Stop/Notification 等 → idle（TTL 60 秒，只用来立刻压掉 mtime 的"工作尾巴"）
-- Codex 侧已写入 `~/.codex/hooks.json` + `config.toml [features] hooks = true`，
-  但 Codex 要求在 TUI 里跑一次 `/hooks` 信任新命令后才生效；未信任前走 mtime 兜底。
+- Codex hook 的可维护源文件是 [`scripts/codex-status-hook.sh`](../scripts/codex-status-hook.sh)。
+  从仓库根目录用 `install -m 755 scripts/codex-status-hook.sh ~/.ai-clock/codex-status-hook.sh`
+  安装，再在 `~/.codex/hooks.json` 为 `SessionStart`、`UserPromptSubmit`、`PreToolUse`、
+  `PermissionRequest`、`PostToolUse`、`Stop` 注册对应 command；`~/.codex/config.toml` 的
+  `[features]` 需有 `hooks = true`。若 TUI 提示信任新命令，运行 `/hooks` 后批准；未启用时
+  仍走 mtime 兜底。
 - 局限：事件是全局的不分会话——A 会话 Stop 会把还在干活的 B 会话压成 idle 最多 60 秒
   （B 的下一个工具调用事件会立刻翻回 working）。
 
 ### GIF 上传架构
 
-架构：GIF 通过 `ESP8266WebServer` 的 multipart 文件上传（`HTTPUpload` 回调）边收边流式
+架构：GIF 通过 ESP32 `WebServer` 的 multipart 文件上传（`HTTPUpload` 回调）边收边流式
 写进 LittleFS 的临时文件（`/c.gif` / `/x.gif`），然后固件用
 [AnimatedGIF](https://github.com/bitbank2/AnimatedGIF) 库**逐行解码**成设备要的 RGB565
 帧，写入 `/c.bin` / `/x.bin`（格式 `[1字节帧数][各帧像素...]`），最后删掉临时 GIF。
 
-ESP8266 总共只有 ~80KB RAM，一帧 120x120 的 RGB565 就 ~28KB，AnimatedGIF 自己也要
-~24KB，两个大缓冲塞不下，所以整条链路都是**逐行流式、不常驻整帧**：
+为避免上传和解码占用过多堆内存，链路仍以**逐行流式**方式工作；ESP32 会缓存当前绘制帧，
+并在动画循环接缝时额外缓存一帧以平滑过渡：
 
 - 上传：multipart 分块写文件，不把整个 body 攒进一个 `String`（那样体积必炸内存）。
 - 解码：AnimatedGIF 逐行回调，只用两条「一行」缓冲把源行最近邻缩放到目标尺寸，直接
   逐行写进 `.bin`；不覆盖到的区域用**上一帧**补齐（读回刚写进 `.bin` 的上一帧），
   这样被优化器裁成小矩形的 GIF（disposal method 1）也能拼对。解码期间才在堆上
   临时 `new` 出 AnimatedGIF，用完就 `delete`。
-- 显示：每次也只把「当前要画的一帧」从 LittleFS 逐行读出来 `pushImage`，不整帧驻留内存。
+- 显示：当前帧从 LittleFS 读入缓存后绘制；动画循环接缝时用第二帧缓存做平滑过渡。
 - 没有自定义素材时，退回固件里编译好的默认动画（`firmware/include/img/*.h`）。
 
 **注意事项 / 局限**：

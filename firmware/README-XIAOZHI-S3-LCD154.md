@@ -1,20 +1,24 @@
-# M5Stack Core Basic / Gray（ESP32 16MB）
+# 小智兼容郑晨 1.54 寸 Wi‑Fi 板（ESP32-S3 N16R8）
 
-本分支 `m5stack-core-esp32-16mb` 面向原版 M5Stack Core Basic / Gray：ESP32、16MB Flash、
-内置 320×240 ILI9341 屏幕。它不适用于 Core2（触摸屏型号）或 M5Stick 系列。
+当前分支只支持小智兼容的郑晨 1.54 寸 Wi‑Fi 板：ESP32‑S3、16MB Flash、8MB OPI PSRAM、
+240×240 ST7789 SPI 屏和板载 I2S 扬声器。它不适用于 ESP8266 SD2 小电视、M5Stack Core、
+Core2、M5Stick 或其他接线不同的开发板。
 
 ## 编译与烧录
 
 ```sh
 cd firmware
-~/.platformio/penv/bin/pio run -t upload
-~/.platformio/penv/bin/pio device monitor
+pio run -e xiaozhi-s3-lcd154
+pio run -e xiaozhi-s3-lcd154 -t upload --upload-port /dev/cu.usbmodem…
+pio device monitor -b 115200
 ```
 
-如需手动指定串口，在命令末尾增加 `--upload-port /dev/cu.usbserial-...`。
+省略 `--upload-port` 时 PlatformIO 会尝试自动识别串口。`platformio.ini` 已固定此板的
+16MB Flash、OPI PSRAM、LittleFS 分区和 ST7789 引脚；不要沿用 M5Stack 或 ESP8266 的环境名及
+引脚配置。
 
 固件使用 16MB 分区表：两套各约 6.25MB 的 OTA 应用分区，以及约 3.44MB LittleFS 分区，
-用于保存桥接地址、亮度设置和上传的 GIF 桌宠。
+用于保存桥接地址、亮度、提示音音量、额度显示方式和上传的 GIF 桌宠。
 
 ## 更新完成提示音
 

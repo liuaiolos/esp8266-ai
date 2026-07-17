@@ -1,10 +1,9 @@
-// M5GO v2.6 ESP32 WiFi clock: shows local time plus live Claude Code / Codex CLI
-// working status and usage quota, polled from a small bridge service that
-// runs on the developer's Mac (see ../bridge/bridge.py).
+// XiaoZhi-compatible ESP32-S3 WiFi clock: shows live Claude Code / Codex CLI
+// working status and usage quota, polled from a bridge service running on a
+// developer's Mac or Windows PC.
 //
-// Display: 320x240 SPI ILI9342C. TFT_eSPI supplies the M5Stack transport and
-// coordinate model; the panel-specific init sequence below follows M5Stack's
-// official M5GO v2.6/Core implementation. Pins are set in platformio.ini.
+// Target display: 240x240 SPI ST7789. Pins and display settings are defined
+// in platformio.ini.
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -88,7 +87,7 @@ static void initM5GoV26Panel() {
 // ---------- custom sprite storage (LittleFS) ----------
 // Custom uploads replace the compiled-in default animation without needing a
 // firmware rebuild. You POST a raw .gif straight to /sprite/claude or
-// /sprite/codex (the device serves its own upload page at "/"); the ESP8266
+// /sprite/codex (the device serves its own upload page at "/"); the ESP32-S3
 // decodes and rescales the GIF *on-device* (AnimatedGIF, line-by-line so it
 // never needs a full-canvas buffer) into the wire format below, which the
 // display path then reads back frame-by-frame:
@@ -107,10 +106,9 @@ const size_t CLAUDE_FRAME_BYTES = (size_t)CLAUDE_SPRITE_W * CLAUDE_SPRITE_H * 2;
 const size_t CODEX_FRAME_BYTES = (size_t)CODEX_SPRITE_W * CODEX_SPRITE_H * 2;
 
 // We never hold a whole sprite frame in RAM. Decoding a GIF needs ~24KB of
-// heap for AnimatedGIF's own buffers, which wouldn't fit alongside a static
-// full-frame buffer (a 120x120 frame is ~28KB) on the ESP8266's ~80KB. So both
-// the display path and the decoder work one screen-row at a time through these
-// two small scratch rows (SCREEN_W is the widest we ever need).
+// heap for AnimatedGIF's own buffers. The decoder therefore works one
+// screen-row at a time through these two small scratch rows (SCREEN_W is the
+// widest we ever need), while ESP32-S3 frame caches keep rendering smooth.
 uint16_t rowBuf[SCREEN_W];     // current row being drawn / decoded
 uint16_t prevRowBuf[SCREEN_W]; // decode only: same row from the previous frame
 // ESP32 has enough heap for one decoded custom frame. Caching the active frame
@@ -469,7 +467,7 @@ void updateBeep() {}
 bool showQuotaRemaining = false;
 
 // ---------- backlight brightness ----------
-// The M5Stack Core panel backlight (TFT_BL, active HIGH) is PWM-dimmable.
+// This board's panel backlight (TFT_BL, active HIGH) is PWM-dimmable.
 // 0 = off, 100 = full. Persisted so it survives reboot.
 
 int brightness = BRIGHTNESS_DEFAULT; // 0-100
@@ -2200,7 +2198,7 @@ bool decodeGifToBin(const char *gifPath, const char *binPath, int targetW, int t
 }
 
 // ---------- sprite upload (raw .gif -> on-device decode) ----------
-// ESP8266WebServer fully buffers a plain POST body into a heap String before
+// WebServer fully buffers a plain POST body into a heap String before
 // the handler runs, which a whole GIF would blow RAM on - so we take the
 // upload over its streaming multipart/HTTPUpload path, writing the raw .gif to
 // LittleFS in small chunks, then decode it on the done callback.

@@ -5,9 +5,9 @@
 
 功能与 Mac 版一致：
 
-- **左键托盘图标** → ESP8266 屏幕实时镜像（额度环 + 桌宠动画 + 网速图 + 音乐页，
-  与设备渲染同一份数据），底部附 自动/Claude/Codex/网速/音乐 快速切换
-- **右键托盘图标** → 控制菜单：Claude/Codex 完整额度（5h/周 + 重置倒计时）、
+- **左键托盘图标** → ESP32-S3 设备屏幕实时镜像（额度环 + 桌宠动画 + 网速图 + 音乐页，
+  与设备渲染同一份数据），底部附 自动/Claude/Codex/网速/音乐快速切换、亮度与完成提示音音量滑条
+- **右键托盘图标** → 控制菜单：Claude/Codex 完整额度、显示已用/剩余额度、
   自动查找并配对设备、设置设备地址、屏幕显示模式、petdex 桌宠画廊、恢复默认动画、
   把本机设为设备桥接、桥接服务地址
 - 本地 HTTP 服务 `0.0.0.0:8765`：`/status`、`/net`、`/music`、`/music/cover.raw`、
@@ -22,7 +22,7 @@
 
 与 Mac 版的差异：
 
-- 无固件刷写入口（刷写请用网页版刷写工具）
+- 无固件刷写入口（请使用仓库中 `firmware/` 的 PlatformIO 命令）
 - 唯一的第三方依赖是 [ImageSharp](https://github.com/SixLabors/ImageSharp)——
   System.Drawing 解不了 petdex 的 WebP 精灵图、也编不了多帧 GIF
 
@@ -44,8 +44,11 @@ dotnet publish -c Release -r win-x64 --self-contained false
 
 **开机自启**：`Win+R` → `shell:startup` → 把 `AIClockBridge.exe` 的快捷方式放进去。
 
-**Hooks 实时状态**（可选，同主 README §7）：Claude Code / Codex 的 hooks 往
-`http://127.0.0.1:8765/event` POST 事件即可，Windows 下 curl 自带。
+**Hooks 实时状态**（可选，同主 README 的 Codex FAQ）：Claude Code / Codex 的 hooks 往
+`http://127.0.0.1:8765/event` POST 事件即可，Windows 下 `curl.exe` 自带。Codex hook 的
+版本控制源文件在仓库根目录 `scripts/codex-status-hook.sh`；在可用 POSIX shell 的环境安装到
+`~/.ai-clock/codex-status-hook.sh`，并按主 README 注册 hooks。纯 Windows 环境请使用等效的
+`curl.exe` command hook，且不要把脚本复制到仓库外却不记录来源。
 
 ## 验证
 
@@ -61,7 +64,7 @@ curl.exe -s http://localhost:8765/status | python -m json.tool
 |---|---|---|
 | `Program.cs` | `main.swift` | 入口 + 路由表 + 被动发现 |
 | `TrayAppContext.cs` | `MenuBarController.swift` | 托盘图标 + 控制菜单 |
-| `MirrorForm.cs` | `MirrorPopover.swift` | 240x240 屏幕镜像弹窗 |
+| `MirrorForm.cs` | `MirrorPopover.swift` | 240x240 设备画面镜像弹窗 |
 | `PetPickerForm.cs` | `PetPickerWindow.swift` | petdex 桌宠选择器 |
 | `PetdexService.cs` | `PetdexService.swift` | manifest / 精灵图 / GIF 合成 |
 | `StatusService.cs` | `StatusReader.swift` | JSONL 日志扫描 + hook 事件 |

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-- `firmware/` contains the M5Stack Core ESP32 Arduino/PlatformIO firmware. Main display, networking, and device HTTP endpoints live in `firmware/src/main.cpp`; bundled sprites and headers are in `firmware/include/`.
+- `firmware/` contains the XiaoZhi-compatible Zhengchen 1.54-inch Wi-Fi board firmware (ESP32-S3, 16 MB flash, 8 MB OPI PSRAM). Main display, networking, and device HTTP endpoints live in `firmware/src/main.cpp`; bundled sprites and headers are in `firmware/include/`.
 - `mac-app/` is the native macOS menu-bar bridge, built with Swift Package Manager. Sources are in `Sources/AIClockBridge/`, resources in `Resources/`, and XCTest tests in `Tests/AIClockBridgeTests/`.
 - `windows-app/AIClockBridge/` is the .NET 8 WinForms bridge. Keep behavior and the device protocol aligned with the macOS implementation.
 - `tools/` holds asset-conversion utilities. `docs/` and the bilingual READMEs document hardware and user workflows.
@@ -12,15 +12,15 @@
 Run commands from the indicated module directory:
 
 ```sh
-cd firmware && pio run -e m5stack-core-esp32     # build ESP32 firmware
-cd firmware && pio run -e m5stack-core-esp32 -t upload --upload-port /dev/cu.usbserial-…
+cd firmware && pio run -e xiaozhi-s3-lcd154     # build ESP32-S3 firmware
+cd firmware && pio run -e xiaozhi-s3-lcd154 -t upload --upload-port /dev/cu.usbmodem…
 cd mac-app && swift run                           # run the macOS bridge
 cd mac-app && swift test                          # run XCTest suite
 cd mac-app && ./scripts/package-macos-app.sh release  # create dist/*.app
 cd windows-app && dotnet build AIClockBridge/AIClockBridge.csproj
 ```
 
-The firmware target uses 16 MB flash and LittleFS; preserve its partition and upload settings unless the hardware changes.
+The firmware target uses 16 MB flash, 8 MB OPI PSRAM and LittleFS; preserve its partition, memory type and display/upload settings unless the hardware changes.
 
 ## Coding Style & Naming Conventions
 

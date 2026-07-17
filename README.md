@@ -4,7 +4,7 @@
 
 <h1 align="center">AI Mac 小屏幕</h1>
 
-<p align="center">桌上的一台 AI 状态小电脑 —— ESP8266 · 开源硬件 · 桌面伴侣</p>
+<p align="center">桌上的一台 AI 状态小电脑 —— ESP32-S3 · 开源硬件 · 桌面伴侣</p>
 
 <p align="center">
   中文 ·
@@ -13,7 +13,6 @@
 
 <p align="center">
   <a href="https://mac.qust.me">官网</a> ·
-  <a href="https://mac.qust.me/#flash">网页刷机</a> ·
   <a href="https://github.com/pengchujin/esp8266-ai/releases/latest">下载</a>
 </p>
 
@@ -34,15 +33,19 @@
 
 ## 快速上手
 
-需要的东西：一台「SD2 小电视」开发板（[开源硬件](https://oshwhub.com/q21182889/sd2)，也可[直接购买成品](https://mobile.yangkeduo.com/goods.html?ps=OuBjGMWE82)）、一根 USB **数据**线。
+需要的东西：一台**小智兼容郑晨 1.54 寸 Wi‑Fi 板**（ESP32‑S3 N16R8、16MB Flash、8MB OPI PSRAM、240×240 ST7789 屏）和一根 USB **数据**线。本固件不支持旧版 ESP8266 SD2 小电视、M5Stack Core、Core2 或 M5Stick。
 
-### 第 1 步 · 刷固件（约 30 秒）
+### 第 1 步 · 构建并烧录固件
 
-用 Chrome / Edge 打开 **[mac.qust.me/#flash](https://mac.qust.me/#flash)**，USB 连接设备，点「连接设备并烧录」，选择串口等待完成即可，无需安装任何工具。
+安装 PlatformIO 后，在仓库根目录构建并烧录：
 
-> 弹窗里看不到串口？Windows 需要装 [CH340 驱动](https://www.wch.cn/downloads/CH341SER_EXE.html)，Mac 系统自带无需安装；换根 USB 线（很多线只能充电）；更多排查见[官网 FAQ](https://mac.qust.me/#flash-faq)。
->
-> 命令行党也可以用 esptool 把 [Releases](https://github.com/pengchujin/esp8266-ai/releases/latest) 里的 `esp8266-ai-firmware-*.bin` 刷到 `0x0`。
+```sh
+cd firmware
+pio run -e xiaozhi-s3-lcd154
+pio run -e xiaozhi-s3-lcd154 -t upload --upload-port /dev/cu.usbmodem…
+```
+
+省略 `--upload-port` 时 PlatformIO 会尝试自动识别串口；板载分区、LittleFS、OPI PSRAM 和 ST7789 引脚配置已写在 `firmware/platformio.ini`。更多硬件和提示音素材说明见 [firmware/README-XIAOZHI-S3-LCD154.md](firmware/README-XIAOZHI-S3-LCD154.md)。
 
 ### 第 2 步 · 配 WiFi
 
@@ -65,7 +68,7 @@
 
 ### USB 有线直连（可选）
 
-若路由器开启了客户端隔离，或暂时不想配置 Wi‑Fi，保持 macOS bridge 运行并用 USB 数据线连接设备即可。bridge 会自动发现 CH340 串口，向设备推送状态和网速数据；设备屏幕会切换到有线数据源。烧录固件前请退出 bridge，避免两个程序同时读取串口。
+若路由器开启了客户端隔离，或暂时不想配置 Wi‑Fi，可保持 macOS bridge 运行并用 USB 数据线连接设备。bridge 识别到兼容串口后会向设备推送状态和网速数据；设备屏幕会切换到有线数据源。烧录固件前请退出 bridge，避免两个程序同时读取串口。
 
 ## 常见问题
 
@@ -77,16 +80,19 @@
 
 桥接程序会扫描 `~/.codex/sessions` 作为兼容兜底，但日志的最后一次写入并不代表 Codex 仍在执行——特别是任务完成或等待审批时，Codex 还会继续落盘。推荐配置 Codex hooks，让生命周期事件直接推送给桥接程序；桥接会以这些事件为准，并自动在没有 hooks 时退回日志扫描。
 
-先保存下面脚本为 `~/.ai-clock/codex-status-hook.sh`，并执行 `chmod +x ~/.ai-clock/codex-status-hook.sh`：
+脚本已随仓库版本控制，位于 [`scripts/codex-status-hook.sh`](scripts/codex-status-hook.sh)。在已克隆的仓库根目录执行下面命令安装到 Codex 配置目录外的稳定位置：
 
 ```sh
-#!/bin/sh
-event="$1"
-cat >/dev/null                         # Codex hook 的 JSON 输入无需在这里解析
-curl -fsS --connect-timeout 0.5 --max-time 1 \
-  -H 'Content-Type: application/json' \
-  -d "{\"agent\":\"codex\",\"event\":\"$event\"}" \
-  http://127.0.0.1:8765/event >/dev/null 2>&1 || true
+mkdir -p ~/.ai-clock
+install -m 755 scripts/codex-status-hook.sh ~/.ai-clock/codex-status-hook.sh
+```
+
+如果系统没有 `install` 命令，改用：
+
+```sh
+mkdir -p ~/.ai-clock
+cp scripts/codex-status-hook.sh ~/.ai-clock/codex-status-hook.sh
+chmod 755 ~/.ai-clock/codex-status-hook.sh
 ```
 
 然后在 `~/.codex/hooks.json` 的 `hooks` 中，为以下六个事件各加入一条 command hook：`SessionStart`、`UserPromptSubmit`、`PreToolUse`、`PermissionRequest`、`PostToolUse`、`Stop`。command 分别填写：
@@ -105,13 +111,16 @@ curl -fsS --connect-timeout 0.5 --max-time 1 \
 
 首次运行时若 Codex 要求确认 hook，请在 Codex 中批准。`PermissionRequest` 会让屏幕停止工作动画并显示红色提醒；`Stop` 会立即结束动画，不会再被最后的 JSONL 写入误判成工作中。
 
+确认 `~/.codex/config.toml` 的 `[features]` 中已启用 `hooks = true`；如 Codex 提示信任新 hook，在 TUI 中运行 `/hooks` 后批准。以后更新仓库后，重新执行上面的安装命令即可更新已安装脚本。
+
 ## 开发
 
 ```
-firmware/     M5Stack Core ESP32 固件（PlatformIO + Arduino，含板上 GIF 解码）
+firmware/     小智兼容 ESP32-S3 1.54 寸屏固件（PlatformIO + Arduino，含板上 GIF 解码）
 mac-app/      macOS 菜单栏桥接（Swift/SPM，零第三方依赖）
 windows-app/  Windows 托盘桥接（C# / .NET 8 WinForms）
 tools/        GIF → RGB565 内置精灵图转换脚本
+scripts/      版本控制的用户辅助脚本（含 Codex 状态 hook）
 docs/         开发文档（硬件引脚、HTTP API、架构细节）
 ```
 
@@ -120,9 +129,9 @@ docs/         开发文档（硬件引脚、HTTP API、架构细节）
 需要 PlatformIO、Xcode/Swift 工具链，以及 Windows 桥接程序所需的 .NET 8 SDK。以下命令均从仓库根目录开始执行；若 `pio` 未加入 `PATH`，可用 `~/.platformio/penv/bin/pio` 替代。
 
 ```bash
-# 固件（M5Stack Core ESP32）
-cd firmware && pio run -e m5stack-core-esp32
-cd firmware && pio run -e m5stack-core-esp32 -t upload --upload-port /dev/cu.usbserial-…
+# 固件（小智兼容 ESP32-S3 1.54 寸屏）
+cd firmware && pio run -e xiaozhi-s3-lcd154
+cd firmware && pio run -e xiaozhi-s3-lcd154 -t upload --upload-port /dev/cu.usbmodem…
 
 # macOS 桥接：运行、测试、Release 应用包
 cd mac-app && swift run
