@@ -53,7 +53,7 @@ final class PetPickerWindowController: NSObject, NSTableViewDataSource, NSTableV
         scroll.documentView = tableView
         scroll.hasVerticalScroller = true
 
-        targetPopup.addItems(withTitles: ["Claude 角色", "Codex 角色"])
+        targetPopup.addItems(withTitles: ["Codex 角色", "Claude 角色"])
         statePopup.addItems(withTitles: PetdexService.states.map { $0.label })
         statePopup.selectItem(at: PetdexService.states.firstIndex { $0.id == "running" } ?? 0)
         targetPopup.target = self
@@ -168,7 +168,7 @@ final class PetPickerWindowController: NSObject, NSTableViewDataSource, NSTableV
 
     /// Device slot pixel sizes must match the firmware's sprite constants.
     private var slotSize: (slot: String, w: Int, h: Int) {
-        targetPopup.indexOfSelectedItem == 0 ? ("claude", 111, 120) : ("codex", 120, 120)
+        targetPopup.indexOfSelectedItem == 0 ? ("codex", 120, 120) : ("claude", 111, 120)
     }
 
     @objc private func previewSelectionChanged() {

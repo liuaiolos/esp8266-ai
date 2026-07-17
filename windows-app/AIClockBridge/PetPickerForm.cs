@@ -47,7 +47,7 @@ sealed class PetPickerForm : Form
         _listBox.SelectedIndexChanged += (_, _) => PreviewSelectionChanged();
 
         _targetCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-        _targetCombo.Items.AddRange(new object[] { "Claude 角色", "Codex 角色" });
+        _targetCombo.Items.AddRange(new object[] { "Codex 角色", "Claude 角色" });
         _targetCombo.SelectedIndex = 0;
         _targetCombo.SelectedIndexChanged += (_, _) => PreviewSelectionChanged();
 
@@ -145,7 +145,7 @@ sealed class PetPickerForm : Form
 
     /// Device slot pixel sizes must match the firmware's sprite constants.
     (string Slot, int W, int H) SlotSize =>
-        _targetCombo.SelectedIndex == 0 ? ("claude", 111, 120) : ("codex", 120, 120);
+        _targetCombo.SelectedIndex == 0 ? ("codex", 120, 120) : ("claude", 111, 120);
 
     async void PreviewSelectionChanged()
     {

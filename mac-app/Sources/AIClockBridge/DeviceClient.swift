@@ -1,5 +1,10 @@
 import Foundation
 
+struct DeviceLightSetting {
+    var color = "#000000"
+    var brightness = 0
+}
+
 // Talks to the ESP8266 clock's own HTTP API, so everything the device's web
 // page can do (switch display, set bridge host, upload/reset pet GIFs) is
 // available straight from the menu bar. Device address persists in defaults.
@@ -18,6 +23,7 @@ struct DeviceInfo {
     var brightness = 100    // backlight 0-100 (0 = off)
     var volume = 72         // completion sound 0-100 (0 = muted)
     var quotaDisplay = "used" // used | remaining
+    var lights: [String: DeviceLightSetting] = [:]
     var claudeCustomSprite = false
     var codexCustomSprite = false
     var claudeW = 111, claudeH = 120
@@ -88,6 +94,13 @@ final class DeviceClient {
                 info.brightness = (obj["brightness"] as? NSNumber)?.intValue ?? 100
                 info.volume = (obj["volume"] as? NSNumber)?.intValue ?? 72
                 info.quotaDisplay = obj["quota_display"] as? String ?? "used"
+                if let lights = obj["lights"] as? [String: [String: Any]] {
+                    for (name, light) in lights {
+                        info.lights[name] = DeviceLightSetting(
+                            color: light["color"] as? String ?? "#000000",
+                            brightness: (light["brightness"] as? NSNumber)?.intValue ?? 0)
+                    }
+                }
                 let claude = obj["claude"] as? [String: Any]
                 let codex = obj["codex"] as? [String: Any]
                 info.claudeCustomSprite = claude?["custom_sprite"] as? Bool ?? false
@@ -132,6 +145,16 @@ final class DeviceClient {
     /// POST /api/quota-display mode=used|remaining; device persists the choice.
     static func setQuotaDisplay(_ mode: String, completion: @escaping (Error?) -> Void) {
         postForm(path: "api/quota-display", fields: ["mode": mode], completion: completion)
+    }
+
+    /// POST /api/lights persists colors and brightness for all M5GO Bottom LED states.
+    static func setLights(_ lights: [String: DeviceLightSetting], completion: @escaping (Error?) -> Void) {
+        var fields: [String: String] = [:]
+        for (name, light) in lights {
+            fields["\(name)_color"] = light.color
+            fields["\(name)_brightness"] = String(light.brightness)
+        }
+        postForm(path: "api/lights", fields: fields, completion: completion)
     }
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes

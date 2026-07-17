@@ -339,6 +339,81 @@ sealed class MirrorControl : Control
     }
 }
 
+sealed class LedSettingsForm : Form
+{
+    readonly Dictionary<string, (Button Color, TrackBar Brightness, Label Value)> _controls = new();
+    public Dictionary<string, DeviceLightSetting> Settings { get; } = new();
+    static readonly (string Key, string Label)[] States =
+    {
+        ("working", "工作中"), ("approval", "等待审批"), ("idle", "空闲"),
+        ("start", "工作开始"), ("completion", "工作完成"),
+    };
+
+    public LedSettingsForm(Dictionary<string, DeviceLightSetting> settings)
+    {
+        Text = "底座状态灯";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        ShowInTaskbar = false;
+        ClientSize = new Size(350, 300);
+
+        for (var i = 0; i < States.Length; i++)
+        {
+            var (key, labelText) = States[i];
+            var setting = settings.TryGetValue(key, out var existing)
+                ? existing : new DeviceLightSetting { Color = "#000000", Brightness = 0 };
+            var y = 18 + i * 42;
+            var label = new Label { Text = labelText, TextAlign = ContentAlignment.MiddleLeft };
+            label.SetBounds(18, y + 4, 76, 24);
+            Controls.Add(label);
+            var color = new Button { BackColor = ParseColor(setting.Color), FlatStyle = FlatStyle.Flat };
+            color.SetBounds(98, y, 42, 28);
+            color.Click += (_, _) => ChooseColor(color);
+            Controls.Add(color);
+            var slider = new TrackBar { Minimum = 0, Maximum = 100, Value = Math.Clamp(setting.Brightness, 0, 100),
+                                         TickStyle = TickStyle.None };
+            slider.SetBounds(148, y, 130, 28);
+            var value = new Label { Text = $"{slider.Value}%", TextAlign = ContentAlignment.MiddleRight };
+            value.SetBounds(282, y + 4, 48, 22);
+            slider.Scroll += (_, _) => value.Text = $"{slider.Value}%";
+            Controls.Add(slider);
+            Controls.Add(value);
+            _controls[key] = (color, slider, value);
+        }
+        var note = new Label { Text = "工作/审批保持呼吸；开始/完成保持扫光。", ForeColor = SystemColors.GrayText };
+        note.SetBounds(18, 235, 315, 20);
+        Controls.Add(note);
+        var save = new Button { Text = "保存", DialogResult = DialogResult.OK };
+        save.SetBounds(258, 262, 74, 28);
+        save.Click += (_, _) => CollectSettings();
+        Controls.Add(save);
+        AcceptButton = save;
+    }
+
+    void ChooseColor(Button button)
+    {
+        using var dialog = new ColorDialog { Color = button.BackColor, FullOpen = true };
+        if (dialog.ShowDialog(this) == DialogResult.OK) button.BackColor = dialog.Color;
+    }
+
+    void CollectSettings()
+    {
+        foreach (var (key, control) in _controls)
+            Settings[key] = new DeviceLightSetting
+            {
+                Color = $"#{control.Color.BackColor.R:X2}{control.Color.BackColor.G:X2}{control.Color.BackColor.B:X2}",
+                Brightness = control.Brightness.Value,
+            };
+    }
+
+    static Color ParseColor(string hex)
+    {
+        try { return ColorTranslator.FromHtml(hex); }
+        catch { return Color.Black; }
+    }
+}
+
 // MARK: - popup form (the popover)
 
 sealed class MirrorForm : Form
@@ -355,6 +430,7 @@ sealed class MirrorForm : Form
     readonly Label _brightnessValue = new();
     readonly TrackBar _volume = new() { Minimum = 0, Maximum = 100, TickStyle = TickStyle.None };
     readonly Label _volumeValue = new();
+    readonly Button _lightsButton = new() { Text = "状态灯…", AutoSize = true };
     // Drag streams many scroll events; posts to the single-threaded ESP8266 web
     // server are throttled mid-drag and the final value always flushes on mouse-up.
     int? _pendingBrightness;
@@ -387,7 +463,7 @@ sealed class MirrorForm : Form
         BackColor = SystemColors.Control;
         Padding = new Padding(1);
 
-        ClientSize = new Size(Px(316), Px(456));
+        ClientSize = new Size(Px(316), Px(490));
 
         _mirror.SetBounds(Px(14), Px(14), Px(288), Px(288));
         Controls.Add(_mirror);
@@ -451,7 +527,11 @@ sealed class MirrorForm : Form
         _volumeValue.Text = "72%";
         Controls.Add(_volumeValue);
 
-        _statusLabel.SetBounds(Px(10), Px(410), Px(296), Px(36));
+        _lightsButton.SetBounds(Px(118), Px(410), Px(80), Px(28));
+        _lightsButton.Click += (_, _) => ShowLightSettings();
+        Controls.Add(_lightsButton);
+
+        _statusLabel.SetBounds(Px(10), Px(442), Px(296), Px(36));
         _statusLabel.TextAlign = ContentAlignment.MiddleCenter;
         _statusLabel.ForeColor = SystemColors.GrayText;
         _statusLabel.Font = new Font("Microsoft YaHei UI", 8.5f);
@@ -566,6 +646,14 @@ sealed class MirrorForm : Form
         var level = Math.Clamp(info.Volume, 0, 100);
         _volume.Value = level;
         _volumeValue.Text = $"{level}%";
+    }
+
+    void ShowLightSettings()
+    {
+        if (_lastInfo == null) return;
+        using var form = new LedSettingsForm(_lastInfo.Lights);
+        if (form.ShowDialog(this) != DialogResult.OK) return;
+        _ = DeviceClient.SetLights(form.Settings);
     }
 
     /// One sweep step: push the newest 4Hz sample, refresh the DL/UL readout.

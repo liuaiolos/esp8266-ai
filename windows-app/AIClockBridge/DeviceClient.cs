@@ -6,6 +6,12 @@ using System.Text.Json;
 
 namespace AIClockBridge;
 
+class DeviceLightSetting
+{
+    public string Color = "#000000";
+    public int Brightness;
+}
+
 // Talks to the ESP8266 clock's own HTTP API, so everything the device's web
 // page can do (switch display, set bridge host, upload/reset pet GIFs) is
 // available straight from the tray. Device address persists in Settings.
@@ -23,6 +29,7 @@ class DeviceInfo
     public int SpriteRev;              // bumped by the device on animation change
     public int Brightness = 100;       // backlight 0-100 (0 = off)
     public int Volume = 72;            // completion sound 0-100 (0 = muted)
+    public Dictionary<string, DeviceLightSetting> Lights = new();
     public bool ClaudeCustomSprite;
     public bool CodexCustomSprite;
     public int ClaudeW = 111, ClaudeH = 120;
@@ -106,6 +113,15 @@ static class DeviceClient
                 Wired = Bool(root, "wired"),
             };
             info.Effective = Str(root, "effective", info.Mode);
+            if (root.TryGetProperty("lights", out var lights) && lights.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var light in lights.EnumerateObject())
+                    info.Lights[light.Name] = new DeviceLightSetting
+                    {
+                        Color = Str(light.Value, "color", "#000000"),
+                        Brightness = Int(light.Value, "brightness", 0),
+                    };
+            }
             if (root.TryGetProperty("claude", out var claude))
             {
                 info.ClaudeCustomSprite = Bool(claude, "custom_sprite");
@@ -145,6 +161,18 @@ static class DeviceClient
     /// POST /api/preview-sound; plays the completion sound at the saved volume.
     public static Task PreviewSound() =>
         PostForm("api/preview-sound", new());
+
+    /// POST /api/lights persists colors and brightness for all M5GO Bottom LED states.
+    public static Task SetLights(Dictionary<string, DeviceLightSetting> lights)
+    {
+        var fields = new Dictionary<string, string>();
+        foreach (var (name, light) in lights)
+        {
+            fields[$"{name}_color"] = light.Color;
+            fields[$"{name}_brightness"] = Math.Clamp(light.Brightness, 0, 100).ToString();
+        }
+        return PostForm("api/lights", fields);
+    }
 
     /// POST /sprite/{claude|codex}  multipart GIF upload — the device decodes
     /// and rescales the GIF on-board, then swaps the animation immediately.

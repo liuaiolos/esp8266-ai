@@ -373,6 +373,86 @@ final class MirrorView: NSView {
     }
 }
 
+// MARK: - M5GO Bottom light settings
+
+private final class LightSettingsWindowController: NSWindowController {
+    private let stateNames = [("working", "工作中"), ("approval", "等待审批"), ("idle", "空闲"),
+                              ("start", "工作开始"), ("completion", "工作完成")]
+    private var controls: [String: (NSColorWell, NSSlider, NSTextField)] = [:]
+    private let saveHandler: ([String: DeviceLightSetting]) -> Void
+
+    init(settings: [String: DeviceLightSetting], save: @escaping ([String: DeviceLightSetting]) -> Void) {
+        saveHandler = save
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 330),
+                            styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        panel.title = "底座状态灯"
+        panel.level = .floating
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        super.init(window: panel)
+        let content = NSView(frame: panel.contentView!.bounds)
+        panel.contentView = content
+
+        for (index, pair) in stateNames.enumerated() {
+            let y = 270 - index * 44
+            let label = NSTextField(labelWithString: pair.1)
+            label.frame = NSRect(x: 20, y: y + 5, width: 84, height: 22)
+            content.addSubview(label)
+            let color = NSColorWell(frame: NSRect(x: 108, y: y, width: 44, height: 30))
+            color.color = Self.color(settings[pair.0]?.color ?? "#000000")
+            content.addSubview(color)
+            let slider = NSSlider(value: Double(settings[pair.0]?.brightness ?? 0), minValue: 0, maxValue: 100,
+                                  target: nil, action: nil)
+            slider.frame = NSRect(x: 160, y: y + 3, width: 130, height: 24)
+            content.addSubview(slider)
+            let value = NSTextField(labelWithString: "\(Int(slider.doubleValue))%")
+            value.frame = NSRect(x: 296, y: y + 5, width: 42, height: 20)
+            value.alignment = .right
+            slider.target = self
+            slider.action = #selector(brightnessChanged(_:))
+            slider.identifier = NSUserInterfaceItemIdentifier(pair.0)
+            content.addSubview(value)
+            controls[pair.0] = (color, slider, value)
+        }
+        let note = NSTextField(labelWithString: "工作/审批保留呼吸效果；开始/完成保留扫光效果。")
+        note.frame = NSRect(x: 20, y: 42, width: 320, height: 18)
+        note.font = NSFont.systemFont(ofSize: 11)
+        note.textColor = .secondaryLabelColor
+        content.addSubview(note)
+        let button = NSButton(title: "保存", target: self, action: #selector(saveSettings))
+        button.frame = NSRect(x: 270, y: 12, width: 70, height: 26)
+        content.addSubview(button)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("LightSettingsWindowController must be created with settings")
+    }
+
+    @objc private func brightnessChanged(_ sender: NSSlider) {
+        guard let name = sender.identifier?.rawValue, let control = controls[name] else { return }
+        control.2.stringValue = "\(Int(sender.doubleValue.rounded()))%"
+    }
+
+    @objc private func saveSettings() {
+        var settings: [String: DeviceLightSetting] = [:]
+        for (name, control) in controls {
+            let c = control.0.color.usingColorSpace(.deviceRGB) ?? control.0.color
+            settings[name] = DeviceLightSetting(color: String(format: "#%02X%02X%02X",
+                                                               Int(c.redComponent * 255), Int(c.greenComponent * 255),
+                                                               Int(c.blueComponent * 255)),
+                                                brightness: Int(control.1.doubleValue.rounded()))
+        }
+        saveHandler(settings)
+        close()
+    }
+
+    private static func color(_ hex: String) -> NSColor {
+        guard hex.count == 7, hex.first == "#", let value = UInt32(hex.dropFirst(), radix: 16) else { return .black }
+        return NSColor(red: CGFloat((value >> 16) & 0xFF) / 255, green: CGFloat((value >> 8) & 0xFF) / 255,
+                       blue: CGFloat(value & 0xFF) / 255, alpha: 1)
+    }
+}
+
 // MARK: - popover controller
 
 final class MirrorPopoverController: NSObject, NSPopoverDelegate {
@@ -390,12 +470,14 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
     private let volumeSlider = NSSlider(value: 72, minValue: 0, maxValue: 100,
                                         target: nil, action: nil)
     private let volumeValueLabel = NSTextField(labelWithString: "72%")
+    private let lightsButton = NSButton(title: "状态灯…", target: nil, action: nil)
     // Drag streams many slider events; posts to the single-threaded ESP8266 web
     // server are throttled mid-drag and the final value always flushes on mouse-up.
     private var pendingBrightness: Int?
     private var lastBrightnessSentAt = Date.distantPast
     private var pendingVolume: Int?
     private var lastVolumeSentAt = Date.distantPast
+    private var lightsWindow: LightSettingsWindowController?
 
     private var pollTimer: Timer?
     private var animTimer: Timer?
@@ -421,7 +503,7 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
 
     private func makeContent() -> NSViewController {
         let vc = NSViewController()
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 316, height: 456))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 316, height: 490))
 
         modeControl.target = self
         modeControl.action = #selector(modeChanged)
@@ -451,9 +533,11 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
         volumeIcon.isBordered = false
         volumeIcon.toolTip = "试听完成提示音"
         volumeIcon.contentTintColor = .secondaryLabelColor
+        lightsButton.target = self
+        lightsButton.action = #selector(showLightSettings)
 
         for v in [mirror, modeControl, brightnessIcon, brightnessSlider, brightnessValueLabel,
-                  volumeIcon, volumeSlider, volumeValueLabel, statusLabel] {
+                  volumeIcon, volumeSlider, volumeValueLabel, lightsButton, statusLabel] {
             v.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(v)
         }
@@ -480,7 +564,9 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
             volumeValueLabel.centerYAnchor.constraint(equalTo: volumeSlider.centerYAnchor),
             volumeValueLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
             volumeValueLabel.widthAnchor.constraint(equalToConstant: 40),
-            statusLabel.topAnchor.constraint(equalTo: volumeSlider.bottomAnchor, constant: 8),
+            lightsButton.topAnchor.constraint(equalTo: volumeSlider.bottomAnchor, constant: 8),
+            lightsButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            statusLabel.topAnchor.constraint(equalTo: lightsButton.bottomAnchor, constant: 6),
             statusLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
             statusLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
         ])
@@ -524,6 +610,31 @@ final class MirrorPopoverController: NSObject, NSPopoverDelegate {
 
     @objc private func previewSound() {
         DeviceClient.previewSound { _ in }
+    }
+
+    @objc private func showLightSettings() {
+        // A settings window must never depend on the first polling response:
+        // opening the popover and clicking immediately should still be useful.
+        presentLightSettings(lastInfo ?? DeviceInfo())
+    }
+
+    private func presentLightSettings(_ info: DeviceInfo) {
+        let window = LightSettingsWindowController(settings: info.lights) { [weak self] settings in
+            DeviceClient.setLights(settings) { error in
+                guard let self = self else { return }
+                if let error = error {
+                    self.statusLabel.stringValue = "保存状态灯设置失败：\(error.localizedDescription)"
+                } else {
+                    self.statusLabel.stringValue = "已保存底座状态灯设置"
+                    self.tick()
+                }
+            }
+        }
+        lightsWindow = window
+        window.showWindow(nil)
+        window.window?.center()
+        window.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func toggle(relativeTo button: NSStatusBarButton) {

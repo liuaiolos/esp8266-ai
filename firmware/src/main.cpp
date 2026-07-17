@@ -16,6 +16,7 @@
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
 #include <AnimatedGIF.h>
+#include <Adafruit_NeoPixel.h>
 #include "esp32-hal-dac.h"
 
 #include "config.h"
@@ -243,6 +244,97 @@ uint8_t bridgeFailCount = 0;
 unsigned long lastWiFiReconnectMs = 0;
 bool statusBaselineReady = false;
 unsigned long beepUntilMs = 0;
+
+// The M5GO Bottom carries ten SK6812 RGB LEDs on GPIO 15. Keep animations
+// non-blocking so status lights never interrupt display rendering or bridge I/O.
+Adafruit_NeoPixel statusLeds(RGB_LED_COUNT, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
+enum LedEffect { LED_STATUS, LED_WORK_STARTED, LED_WORK_COMPLETED };
+LedEffect ledEffect = LED_STATUS;
+unsigned long ledEffectStartedMs = 0;
+unsigned long lastLedRefreshMs = 0;
+const unsigned long LED_REFRESH_MS = 30;
+const unsigned long LED_WORK_STARTED_MS = 500;
+const unsigned long LED_WORK_COMPLETED_MS = 1200;
+
+struct LedConfig {
+  uint8_t red;
+  uint8_t green;
+  uint8_t blue;
+  uint8_t brightness; // 0-100
+};
+
+LedConfig workingLed = {0, 255, 0, 50};
+LedConfig approvalLed = {255, 0, 0, 50};
+LedConfig idleLed = {0, 0, 255, 8};
+LedConfig startLed = {0, 255, 170, 55};
+LedConfig completionLed = {0, 150, 255, 55};
+
+uint8_t scaleLedChannel(uint8_t channel, uint8_t brightness, uint8_t intensity = 255) {
+  return (uint16_t)channel * brightness * intensity / (100UL * 255UL);
+}
+
+uint8_t ledBreathLevel(unsigned long nowMs) {
+  const unsigned long periodMs = 1800;
+  unsigned long phase = nowMs % periodMs;
+  unsigned long half = periodMs / 2;
+  unsigned long ramp = phase < half ? phase : periodMs - phase;
+  return 35 + (uint8_t)(ramp * 220 / half);
+}
+
+void fillStatusLeds(const LedConfig &config, uint8_t intensity = 255) {
+  uint32_t color = statusLeds.Color(scaleLedChannel(config.red, config.brightness, intensity),
+                                    scaleLedChannel(config.green, config.brightness, intensity),
+                                    scaleLedChannel(config.blue, config.brightness, intensity));
+  for (int i = 0; i < RGB_LED_COUNT; ++i) statusLeds.setPixelColor(i, color);
+}
+
+void triggerLedEffect(LedEffect effect) {
+  ledEffect = effect;
+  ledEffectStartedMs = millis();
+  lastLedRefreshMs = 0;
+}
+
+void updateStatusLeds() {
+  unsigned long nowMs = millis();
+  if (nowMs - lastLedRefreshMs < LED_REFRESH_MS) return;
+  lastLedRefreshMs = nowMs;
+
+  if (ledEffect != LED_STATUS) {
+    unsigned long duration = ledEffect == LED_WORK_STARTED ? LED_WORK_STARTED_MS : LED_WORK_COMPLETED_MS;
+    unsigned long elapsed = nowMs - ledEffectStartedMs;
+    if (elapsed < duration) {
+      int head = (int)((elapsed * RGB_LED_COUNT) / duration);
+      statusLeds.clear();
+      for (int i = 0; i < RGB_LED_COUNT; ++i) {
+        int distance = abs(i - head);
+        if (distance == 0) {
+          const LedConfig &config = ledEffect == LED_WORK_STARTED ? startLed : completionLed;
+          statusLeds.setPixelColor(i, statusLeds.Color(scaleLedChannel(config.red, config.brightness),
+                                                        scaleLedChannel(config.green, config.brightness),
+                                                        scaleLedChannel(config.blue, config.brightness)));
+        } else if (distance == 1) {
+          const LedConfig &config = ledEffect == LED_WORK_STARTED ? startLed : completionLed;
+          statusLeds.setPixelColor(i, statusLeds.Color(scaleLedChannel(config.red, config.brightness, 48),
+                                                        scaleLedChannel(config.green, config.brightness, 48),
+                                                        scaleLedChannel(config.blue, config.brightness, 48)));
+        }
+      }
+      statusLeds.show();
+      return;
+    }
+    ledEffect = LED_STATUS;
+  }
+
+  if (claudeStatus.needsInput || codexStatus.needsInput) {
+    fillStatusLeds(approvalLed, ledBreathLevel(nowMs));
+  } else if (claudeStatus.status == "working" || codexStatus.status == "working") {
+    fillStatusLeds(workingLed, ledBreathLevel(nowMs));
+  } else {
+    fillStatusLeds(idleLed);
+  }
+  statusLeds.show();
+}
+
 const int SPEAKER_CHANNEL = 1;
 int completionVolume = COMPLETION_SOUND_VOLUME_DEFAULT; // 0-100
 // HTTP handlers run on Core 0, while the Arduino loop (and Hook completion)
@@ -422,6 +514,75 @@ void saveCompletionVolume() {
   if (!f) return;
   f.println(completionVolume);
   f.close();
+}
+
+void loadLedSettings() {
+  if (!LittleFS.exists(LED_SETTINGS_FILE)) return;
+  File f = LittleFS.open(LED_SETTINGS_FILE, "r");
+  if (!f) return;
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, f);
+  f.close();
+  if (error) return;
+
+  auto load = [&doc](const char *name, LedConfig &config) {
+    JsonArray values = doc[name].as<JsonArray>();
+    if (values.size() != 4) return;
+    config.red = values[0] | config.red;
+    config.green = values[1] | config.green;
+    config.blue = values[2] | config.blue;
+    config.brightness = constrain(values[3] | config.brightness, 0, 100);
+  };
+  load("working", workingLed);
+  load("approval", approvalLed);
+  load("idle", idleLed);
+  load("start", startLed);
+  load("completion", completionLed);
+}
+
+void saveLedSettings() {
+  JsonDocument doc;
+  auto save = [&doc](const char *name, const LedConfig &config) {
+    JsonArray values = doc[name].to<JsonArray>();
+    values.add(config.red);
+    values.add(config.green);
+    values.add(config.blue);
+    values.add(config.brightness);
+  };
+  save("working", workingLed);
+  save("approval", approvalLed);
+  save("idle", idleLed);
+  save("start", startLed);
+  save("completion", completionLed);
+  File f = LittleFS.open(LED_SETTINGS_FILE, "w");
+  if (!f) return;
+  serializeJson(doc, f);
+  f.close();
+}
+
+String ledColorHex(const LedConfig &config) {
+  char value[8];
+  snprintf(value, sizeof(value), "#%02X%02X%02X", config.red, config.green, config.blue);
+  return String(value);
+}
+
+bool updateLedConfig(const String &colorText, const String &brightnessText, LedConfig &config) {
+  bool changed = false;
+  if (colorText.length() == 7 && colorText[0] == '#') {
+    char *end = nullptr;
+    unsigned long color = strtoul(colorText.substring(1).c_str(), &end, 16);
+    if (end && *end == '\0') {
+      config.red = (color >> 16) & 0xFF;
+      config.green = (color >> 8) & 0xFF;
+      config.blue = color & 0xFF;
+      changed = true;
+    }
+  }
+  if (brightnessText.length() > 0) {
+    config.brightness = constrain(brightnessText.toInt(), 0, 100);
+    changed = true;
+  }
+  return changed;
 }
 
 // ---------- persistence for the bridge host ----------
@@ -1413,8 +1574,14 @@ void pollBridge() {
       everPolled = true;
       bridgeFailCount = 0;
       statusBaselineReady = true;
-      if (started) triggerWorkStartedBeep();
-      if (completed) triggerCompletionBeep();
+      if (started) {
+        triggerLedEffect(LED_WORK_STARTED);
+        triggerWorkStartedBeep();
+      }
+      if (completed) {
+        triggerLedEffect(LED_WORK_COMPLETED);
+        triggerCompletionBeep();
+      }
       Serial.printf("[bridge] claude=%s tok=%ld | codex=%s tok=%ld primary=%.0f%%\n",
                     claudeStatus.status.c_str(), claudeStatus.tokensToday,
                     codexStatus.status.c_str(), codexStatus.tokensToday, codexStatus.primaryPct);
@@ -1481,8 +1648,14 @@ void handleSerialFrame(char *line) {
       everPolled = true;
       bridgeFailCount = 0;
       statusBaselineReady = true;
-      if (started) triggerWorkStartedBeep();
-      if (completed) triggerCompletionBeep();
+      if (started) {
+        triggerLedEffect(LED_WORK_STARTED);
+        triggerWorkStartedBeep();
+      }
+      if (completed) {
+        triggerLedEffect(LED_WORK_COMPLETED);
+        triggerCompletionBeep();
+      }
       showMainUiIfNeeded();
       DisplayMode eff = effectiveMode();
       if (eff != MODE_NET && eff != MODE_MUSIC) {
@@ -1550,10 +1723,21 @@ String htmlEscape(const String &s) {
   return out;
 }
 
+String lightControlRow(const char *label, const char *name, const LedConfig &config) {
+  String brightnessId = String(name) + "Brightness";
+  String html = "<label>" + String(label) + "</label><div class='light-row'>";
+  html += "<input type='color' name='" + String(name) + "_color' value='" + ledColorHex(config) + "'>";
+  html += "<input type='range' min='0' max='100' name='" + String(name) + "_brightness' value='" +
+          String(config.brightness) + "' oninput=\"document.getElementById('" + brightnessId +
+          "').textContent=this.value+'%'\">";
+  html += "<span id='" + brightnessId + "'>" + String(config.brightness) + "%</span></div>";
+  return html;
+}
+
 void handleRoot() {
   String age = everPolled ? String((millis() - lastSuccessMs) / 1000) + "s ago" : "never";
   String html;
-  html.reserve(3072);
+  html.reserve(5600);
   html += "<!DOCTYPE html><html><head><meta charset='utf-8'>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
   html += "<title>AI Clock 设置</title>";
@@ -1562,6 +1746,9 @@ void handleRoot() {
           "input{width:100%;box-sizing:border-box;padding:8px;font-size:16px;margin-top:4px}"
           "button{margin-top:16px;padding:10px 20px;font-size:16px;background:#2563eb;color:#fff;"
           "border:none;border-radius:6px}"
+          ".light-row{display:flex;align-items:center;gap:10px;margin-top:4px}"
+          ".light-row input[type=color]{width:44px;height:34px;padding:2px}"
+          ".light-row input[type=range]{margin:0;flex:1}.light-row span{width:42px;text-align:right}"
           "table{margin-top:20px;border-collapse:collapse;width:100%}"
           "td{padding:4px 8px;border-bottom:1px solid #eee;font-size:14px}"
           ".dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}"
@@ -1593,6 +1780,16 @@ void handleRoot() {
   html += "<button type='button' onclick=\"fetch('/api/preview-sound',{method:'POST'})\" "
           "style='margin-top:8px;padding:7px 12px;font-size:13px'>试听完成提示音</button>";
 
+  html += "<h2 style='font-size:16px;margin-top:28px'>底座状态灯</h2>";
+  html += "<p style='font-size:13px;color:#555'>颜色和亮度会保存到设备；呼吸与扫光效果保持不变。</p>";
+  html += "<form onsubmit=\"saveLights(this);return false;\">";
+  html += lightControlRow("工作中（绿色呼吸）", "working", workingLed);
+  html += lightControlRow("等待审批（红色呼吸）", "approval", approvalLed);
+  html += lightControlRow("空闲（低亮常亮）", "idle", idleLed);
+  html += lightControlRow("工作开始（扫光）", "start", startLed);
+  html += lightControlRow("工作完成（扫光）", "completion", completionLed);
+  html += "<button type='submit'>保存状态灯设置</button></form>";
+
   html += "<h2 style='font-size:16px;margin-top:28px'>额度显示</h2>";
   html += "<select id='quota' onchange=\"fetch('/api/quota-display',{method:'POST',headers:{'Content-Type':"
           "'application/x-www-form-urlencoded'},body:'mode='+this.value})\">";
@@ -1612,7 +1809,8 @@ void handleRoot() {
   html += "</form>";
   html += "<script>function setGifAction(){"
           "document.getElementById('gifForm').action='/sprite/'+document.getElementById('gifTarget').value;"
-          "return true;}</script>";
+          "return true;}function saveLights(form){fetch('/api/lights',{method:'POST',body:new URLSearchParams(new FormData(form))})"
+          ".then(function(){location.reload();});}</script>";
 
   html += "<table>";
   html += "<tr><td>WiFi SSID</td><td>" + htmlEscape(WiFi.SSID()) + "</td></tr>";
@@ -1674,6 +1872,17 @@ void handleApiInfo() {
   doc["quota_display"] = showQuotaRemaining ? "remaining" : "used";
   doc["wired"] = wiredActive();
   doc["fw"] = FW_VERSION;
+  JsonObject lights = doc["lights"].to<JsonObject>();
+  auto addLight = [&lights](const char *name, const LedConfig &config) {
+    JsonObject light = lights[name].to<JsonObject>();
+    light["color"] = ledColorHex(config);
+    light["brightness"] = config.brightness;
+  };
+  addLight("working", workingLed);
+  addLight("approval", approvalLed);
+  addLight("idle", idleLed);
+  addLight("start", startLed);
+  addLight("completion", completionLed);
   JsonObject c = doc["claude"].to<JsonObject>();
   c["status"] = claudeStatus.status;
   c["custom_sprite"] = claudeCustom;
@@ -1759,6 +1968,25 @@ void handleApiQuotaDisplay() {
   if (effectiveMode() != MODE_NET && effectiveMode() != MODE_MUSIC) appRedrawRequested = true;
   Serial.printf("[api] quota display = %s\n", mode.c_str());
   webServer.send(200, "text/plain", "ok");
+}
+
+void handleApiLights() {
+  auto update = [](const char *name, LedConfig &config) {
+    return updateLedConfig(webServer.arg(String(name) + "_color"),
+                           webServer.arg(String(name) + "_brightness"), config);
+  };
+  bool changed = false;
+  changed |= update("working", workingLed);
+  changed |= update("approval", approvalLed);
+  changed |= update("idle", idleLed);
+  changed |= update("start", startLed);
+  changed |= update("completion", completionLed);
+  if (changed) {
+    saveLedSettings();
+    ledEffect = LED_STATUS;
+    lastLedRefreshMs = 0;
+  }
+  webServer.send(200, "application/json", "{\"ok\":true}");
 }
 
 void handleApiBridge() {
@@ -2089,6 +2317,7 @@ void setupWebServer() {
   webServer.on("/api/volume", HTTP_POST, handleApiVolume);
   webServer.on("/api/preview-sound", HTTP_POST, handleApiPreviewSound);
   webServer.on("/api/quota-display", HTTP_POST, handleApiQuotaDisplay);
+  webServer.on("/api/lights", HTTP_POST, handleApiLights);
   webServer.on("/sprite/claude/reset", HTTP_POST, []() { handleSpriteReset(APP_CLAUDE); });
   webServer.on("/sprite/codex/reset", HTTP_POST, []() { handleSpriteReset(APP_CODEX); });
   webServer.on("/sprite/claude/raw", HTTP_GET, []() { handleSpriteRaw(APP_CLAUDE); });
@@ -2153,6 +2382,7 @@ void setup() {
   loadCompletionVolume();
   loadQuotaDisplay();
   loadDisplayMode();
+  loadLedSettings();
   loadCustomSpriteState();
 
   tft.init();
@@ -2167,6 +2397,9 @@ void setup() {
   ledcSetup(SPEAKER_CHANNEL, 2000, 8);
   ledcAttachPin(SPEAKER_PIN, SPEAKER_CHANNEL);
   ledcWriteTone(SPEAKER_CHANNEL, 0);
+  statusLeds.begin();
+  statusLeds.clear();
+  statusLeds.show();
 
   setupWiFi();
   if (WiFi.status() == WL_CONNECTED) {
@@ -2199,6 +2432,7 @@ void loop() {
   if (!mainUiShown) return;
 
   updateBeep();
+  updateStatusLeds();
   processPendingSpriteDecode();
   unsigned long nowMs = millis();
 
