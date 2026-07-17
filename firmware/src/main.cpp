@@ -19,6 +19,7 @@
 #include "esp32-hal-dac.h"
 
 #include "config.h"
+#include "audio/building_pcm.h"
 #include "audio/construction_complete_pcm.h"
 #include "img/claude_sprite.h"
 #include "img/codex_sprite.h"
@@ -262,8 +263,8 @@ void restoreSpeakerToneOutput() {
   ledcWrite(SPEAKER_CHANNEL, 0);
 }
 
-void playCompletionSound() {
-  if (construction_complete_pcm_len == 0) return;
+void playPcmSound(const uint8_t *pcm, size_t pcmLen) {
+  if (pcmLen == 0) return;
 
   // LEDC and the DAC cannot drive GPIO 25 at the same time.
   ledcWriteTone(SPEAKER_CHANNEL, 0);
@@ -277,8 +278,8 @@ void playCompletionSound() {
   uint32_t fractionalUs = 0;
   constexpr uint32_t wholeUs = 1000000UL / COMPLETION_SAMPLE_RATE;
   constexpr uint32_t remainderUs = 1000000UL % COMPLETION_SAMPLE_RATE;
-  for (size_t i = 0; i < construction_complete_pcm_len; ++i) {
-    int sample = (int)pgm_read_byte(construction_complete_pcm + i) - 128;
+  for (size_t i = 0; i < pcmLen; ++i) {
+    int sample = (int)pgm_read_byte(pcm + i) - 128;
     sample = sample * completionVolume / 100;
     dacWrite(SPEAKER_PIN, sample + 128);
 
@@ -295,6 +296,10 @@ void playCompletionSound() {
   restoreSpeakerToneOutput();
 }
 
+void playCompletionSound() { playPcmSound(construction_complete_pcm, construction_complete_pcm_len); }
+
+void playWorkStartedSound() { playPcmSound(building_pcm, building_pcm_len); }
+
 void triggerCompletionBeep() {
   if (construction_complete_pcm_len > 0) {
     playCompletionSound();
@@ -304,6 +309,17 @@ void triggerCompletionBeep() {
   beepUntilMs = millis() + 120;
   ledcWriteTone(SPEAKER_CHANNEL, 520);
   ledcWrite(SPEAKER_CHANNEL, 24);
+}
+
+void triggerWorkStartedBeep() {
+  if (building_pcm_len > 0) {
+    playWorkStartedSound();
+    return;
+  }
+  // Keep a distinct short fallback if a custom build omits the start asset.
+  beepUntilMs = millis() + 80;
+  ledcWriteTone(SPEAKER_CHANNEL, 740);
+  ledcWrite(SPEAKER_CHANNEL, 20);
 }
 
 void updateBeep() {
@@ -1390,10 +1406,14 @@ void pollBridge() {
       bool completed = statusBaselineReady &&
                        ((wasClaudeWorking && claudeStatus.status != "working") ||
                         (wasCodexWorking && codexStatus.status != "working"));
+      bool started = statusBaselineReady &&
+                     ((!wasClaudeWorking && claudeStatus.status == "working") ||
+                      (!wasCodexWorking && codexStatus.status == "working"));
       lastSuccessMs = millis();
       everPolled = true;
       bridgeFailCount = 0;
       statusBaselineReady = true;
+      if (started) triggerWorkStartedBeep();
       if (completed) triggerCompletionBeep();
       Serial.printf("[bridge] claude=%s tok=%ld | codex=%s tok=%ld primary=%.0f%%\n",
                     claudeStatus.status.c_str(), claudeStatus.tokensToday,
@@ -1454,10 +1474,14 @@ void handleSerialFrame(char *line) {
       bool completed = statusBaselineReady &&
                        ((wasClaudeWorking && claudeStatus.status != "working") ||
                         (wasCodexWorking && codexStatus.status != "working"));
+      bool started = statusBaselineReady &&
+                     ((!wasClaudeWorking && claudeStatus.status == "working") ||
+                      (!wasCodexWorking && codexStatus.status == "working"));
       lastSuccessMs = millis();
       everPolled = true;
       bridgeFailCount = 0;
       statusBaselineReady = true;
+      if (started) triggerWorkStartedBeep();
       if (completed) triggerCompletionBeep();
       showMainUiIfNeeded();
       DisplayMode eff = effectiveMode();
@@ -1559,7 +1583,7 @@ void handleRoot() {
   html += "<div style='font-size:13px;color:#555'>当前：<span id='briv'>" + String(brightness) +
           "%</span>（0 = 熄屏，设置立即生效并记住）</div>";
 
-  html += "<h2 style='font-size:16px;margin-top:28px'>完成提示音音量</h2>";
+  html += "<h2 style='font-size:16px;margin-top:28px'>工作提示音音量</h2>";
   html += "<input type='range' min='0' max='100' value='" + String(completionVolume) + "' id='vol' "
           "oninput=\"document.getElementById('volv').textContent=this.value+'%'\" "
           "onchange=\"fetch('/api/volume',{method:'POST',headers:{'Content-Type':"
@@ -1567,7 +1591,7 @@ void handleRoot() {
   html += "<div style='font-size:13px;color:#555'>当前：<span id='volv'>" + String(completionVolume) +
           "%</span>（0 = 静音，设置会保存）</div>";
   html += "<button type='button' onclick=\"fetch('/api/preview-sound',{method:'POST'})\" "
-          "style='margin-top:8px;padding:7px 12px;font-size:13px'>试听提示音</button>";
+          "style='margin-top:8px;padding:7px 12px;font-size:13px'>试听完成提示音</button>";
 
   html += "<h2 style='font-size:16px;margin-top:28px'>额度显示</h2>";
   html += "<select id='quota' onchange=\"fetch('/api/quota-display',{method:'POST',headers:{'Content-Type':"
