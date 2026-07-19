@@ -39,7 +39,9 @@
 #else
 #define SPEAKER_PIN 25
 #endif
-#define COMPLETION_SOUND_VOLUME_DEFAULT 72
+// xiaodai's Zhengchen board starts at 70 and caps output volume at 100.
+#define COMPLETION_SOUND_VOLUME_DEFAULT 70
+#define COMPLETION_SOUND_VOLUME_MAX 100
 
 // ---- Display layout ----
 #if defined(XIAOZHI_S3_LCD154)

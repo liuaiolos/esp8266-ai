@@ -24,7 +24,6 @@
 #else
 #include <driver/i2s.h>
 #endif
-#include <math.h>
 #endif
 
 #include "config.h"
@@ -303,7 +302,7 @@ void playCompletionSound() {
   constexpr uint32_t remainderUs = 1000000UL % COMPLETION_SAMPLE_RATE;
   for (size_t i = 0; i < construction_complete_pcm_len; ++i) {
     int sample = (int)pgm_read_byte(construction_complete_pcm + i) - 128;
-    sample = sample * completionVolume / 100;
+    sample = sample * completionVolume / COMPLETION_SOUND_VOLUME_MAX;
     dacWrite(SPEAKER_PIN, sample + 128);
 
     nextSampleAt += wholeUs;
@@ -339,8 +338,6 @@ void updateBeep() {
 }
 #elif defined(XIAOZHI_S3_LCD154)
 // The Zhengchen board's amplifier receives 32-bit, left-slot I2S audio.
-// Generate a short tone for completion/preview rather than trying to drive
-// the speaker connector from the ESP32's unavailable DAC.
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
 i2s_chan_handle_t speakerI2sChannel = nullptr;
 #else
@@ -422,22 +419,30 @@ void initI2sSpeaker() {
   Serial.println("[audio] I2S standard speaker ready");
 }
 
-void triggerCompletionBeep() {
-  if (!speakerI2sReady || completionVolume == 0) return;
+void playCompletionSoundI2s() {
+  if (!speakerI2sReady || completionVolume == 0 ||
+      construction_complete_pcm_len < 2) return;
 
-  constexpr uint32_t kSampleRate = 24000;
-  constexpr uint32_t kToneHz = 880;
-  constexpr size_t kSamples = kSampleRate / 7; // about 140 ms
+  // The bundled header is the normalized 11,025 Hz mono PCM derived from
+  // assets/construction_complete.wav.  Keep the board's 24 kHz I2S clock and
+  // linearly resample each sample into that stream.
+  constexpr uint32_t kSourceSampleRate = COMPLETION_SAMPLE_RATE;
+  constexpr uint32_t kOutputSampleRate = 24000;
   constexpr size_t kChunkSamples = 240;
   int32_t samples[kChunkSamples];
-  // The board's I2S amplifier expects a full-scale 32-bit stream.  The
-  // previous conservative gain made the small onboard speaker barely audible.
-  const float amplitude = 0x70000000L * completionVolume / 100.0f;
-  for (size_t offset = 0; offset < kSamples; offset += kChunkSamples) {
-    size_t count = min(kChunkSamples, kSamples - offset);
+  const size_t outputSamples =
+      (construction_complete_pcm_len - 1) * kOutputSampleRate / kSourceSampleRate;
+  for (size_t offset = 0; offset < outputSamples; offset += kChunkSamples) {
+    size_t count = min(kChunkSamples, outputSamples - offset);
     for (size_t i = 0; i < count; ++i) {
-      float phase = 2.0f * PI * kToneHz * (offset + i) / kSampleRate;
-      samples[i] = (int32_t)(sinf(phase) * amplitude);
+      uint64_t sourcePosition = (uint64_t)(offset + i) * kSourceSampleRate;
+      size_t sourceIndex = sourcePosition / kOutputSampleRate;
+      uint32_t fraction = sourcePosition % kOutputSampleRate;
+      int64_t sampleA = ((int)pgm_read_byte(construction_complete_pcm + sourceIndex) - 128) * 16777216LL;
+      int64_t sampleB = ((int)pgm_read_byte(construction_complete_pcm + sourceIndex + 1) - 128) * 16777216LL;
+      int64_t interpolated = sampleA + (sampleB - sampleA) * fraction / kOutputSampleRate;
+      samples[i] = (int32_t)(interpolated * completionVolume /
+                             COMPLETION_SOUND_VOLUME_MAX);
     }
     size_t bytesWritten = 0;
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -453,6 +458,10 @@ void triggerCompletionBeep() {
       return;
     }
   }
+}
+
+void triggerCompletionBeep() {
+  playCompletionSoundI2s();
 }
 
 void updateBeep() {}
@@ -550,7 +559,7 @@ void loadCompletionVolume() {
   if (!f) return;
   int v = f.readStringUntil('\n').toInt();
   f.close();
-  if (v >= 0 && v <= 100) completionVolume = v;
+  if (v >= 0 && v <= COMPLETION_SOUND_VOLUME_MAX) completionVolume = v;
 }
 
 void saveCompletionVolume() {
@@ -1688,7 +1697,8 @@ void handleSerialFrame(char *line) {
       saveBrightness();
     }
     if (doc["volume"].is<int>()) {
-      completionVolume = constrain(doc["volume"].as<int>(), 0, 100);
+      completionVolume = constrain(doc["volume"].as<int>(), 0,
+                                   COMPLETION_SOUND_VOLUME_MAX);
       saveCompletionVolume();
     }
     if (doc["preview_sound"] == true) triggerCompletionBeep();
@@ -1771,7 +1781,7 @@ void handleRoot() {
           "%</span>（0 = 熄屏，设置立即生效并记住）</div>";
 
   html += "<h2 style='font-size:16px;margin-top:28px'>完成提示音音量</h2>";
-  html += "<input type='range' min='0' max='100' value='" + String(completionVolume) + "' id='vol' "
+  html += "<input type='range' min='0' max='" + String(COMPLETION_SOUND_VOLUME_MAX) + "' value='" + String(completionVolume) + "' id='vol' "
           "oninput=\"document.getElementById('volv').textContent=this.value+'%'\" "
           "onchange=\"fetch('/api/volume',{method:'POST',headers:{'Content-Type':"
           "'application/x-www-form-urlencoded'},body:'level='+this.value})\">";
@@ -1920,10 +1930,11 @@ void handleApiBrightness() {
 void handleApiVolume() {
   String levelArg = webServer.arg("level");
   if (levelArg.length() == 0) {
-    webServer.send(400, "text/plain", "missing level (0-100)");
+    webServer.send(400, "text/plain", "missing level (0-" +
+                                        String(COMPLETION_SOUND_VOLUME_MAX) + ")");
     return;
   }
-  completionVolume = constrain(levelArg.toInt(), 0, 100);
+  completionVolume = constrain(levelArg.toInt(), 0, COMPLETION_SOUND_VOLUME_MAX);
   saveCompletionVolume();
   Serial.printf("[api] completion volume = %d\n", completionVolume);
   webServer.send(200, "text/plain", "ok");
